@@ -187,8 +187,12 @@ def _process_accounts(accounts, run_id, region_split):
             _save_tokens_file(fname, toks, spec)
             region_files[reg] = fname
 
-    # Main output: jwt_token.json
-    _save_tokens_file('jwt_token.json', results_ok, region_split.get('__main__') if isinstance(region_split, dict) else None)
+    # Main output: use the configured output name (default token_bd.json)
+    main_spec = region_split.get('__main__') if isinstance(region_split, dict) else None
+    if main_spec is None:
+        main_spec = {'server_id': None, 'path': '', 'filename': output_name}
+    main_spec['filename'] = output_name
+    _save_tokens_file(output_name, results_ok, main_spec)
 
     with _run_lock:
         RUNS[run_id].update({
