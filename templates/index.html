@@ -1534,16 +1534,15 @@
                 <div>
                     <label class="text-xs opacity-70 mb-1 block">📄 Source — ফোনের ফাইল Upload করুন অথবা Server থেকে Browse/Load করুন (accounts.txt / JSON সব format চালে)</label>
                     <div class="flex gap-2">
-                        <button onclick="$('jwf-src-localfile').click()" class="fx-btn fx-btn-warning flex-1" style="min-height:42px;"><i class="fas fa-file-upload"></i> ফাইল Upload করুন</button>
+                        <label class="fx-btn fx-btn-warning flex-1" style="min-height:42px; cursor:pointer;" for="jwf-src-localfile"><i class="fas fa-file-upload"></i> ফাইল Upload করুন<input type="file" id="jwf-src-localfile" accept=".txt,.json,.js,.csv" class="hidden" onchange="jwfLoadLocalFile(this)"></label>
                         <button onclick="jwfBrowse('src')" class="fx-btn fx-btn-info flex-1" style="min-height:42px;"><i class="fas fa-folder-open"></i> Server Browse</button>
-                        <input type="file" id="jwf-src-localfile" accept=".txt,.json,.js,.csv" class="hidden" onchange="jwfLoadLocalFile(this)">
                     </div>
                     <div class="flex gap-2 mt-2">
                         <select id="jwf-src-server" class="fx-select flex-1" onchange="jwfLoadServerOptions('src')"></select>
                         <select id="jwf-src-subpath" class="fx-select flex-[2]" onchange="jwfLoadServerOptions('src')"></select>
                         <button onclick="jwfLoadSourceFile()" class="fx-btn fx-btn-success"><i class="fas fa-download"></i> Load</button>
                     </div>
-                    <div class="flex items-center gap-2 mt-2"><span id="jwf-src-status" class="text-[11px] opacity-60"></span></div>
+                    <div class="flex items-center gap-2 mt-2"><span id="jwf-src-status" class="text-[11px] opacity-60">💡 ট্যাপ করে ফাইল বাছাই করুন</span></div>
                     <textarea id="jwf-source" placeholder="Or directly এখানে পেস্ট করুন (uid:pass per line / JSON)" class="fx-input font-mono mt-2" style="min-height:110px;"></textarea>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1670,7 +1669,7 @@
     
     <!-- ================= JWT FACTORY JS ================= -->
     
-  <script src="/app.js?v=15"></script>
+  <script src="/app.js?v=17&r={{ range(1000,9999) | random }}"></script>
   <script>
     /* per-request Jinja config */
     window.__BASE_DIR = {{ base_dir | tojson }};

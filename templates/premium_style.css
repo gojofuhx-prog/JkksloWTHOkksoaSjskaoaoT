@@ -161,8 +161,6 @@ body::before {
     transition: left .32s cubic-bezier(.2,.8,.2,1);
     overflow-y: auto;
     box-shadow: var(--elev-3);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
 }
 .sidebar.open { left: 0; }
 .sidebar-header {
@@ -203,7 +201,6 @@ body::before {
     position: fixed; inset: 0;
     background: rgba(0,0,0,.6);
     z-index: 999; display: none;
-    backdrop-filter: blur(6px);
 }
 .sidebar-overlay.open { display: block; }
 
@@ -211,8 +208,6 @@ body::before {
 .fx-header {
     background: color-mix(in srgb, var(--bg) 72%, transparent);
     border-bottom: 1px solid var(--hairline);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
     box-shadow: 0 2px 18px rgba(0,0,0,.18);
 }
 .fx-header .header-left button { transition: transform .2s; }
@@ -355,8 +350,6 @@ body::before {
     font-weight: 600;
     z-index: 9999;
     animation: toastIn .3s cubic-bezier(.2,.8,.2,1);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
     box-shadow: var(--elev-2);
     border: 1px solid var(--hairline);
 }
@@ -375,10 +368,8 @@ body::before {
     z-index: 2000; display: none;
     align-items: center; justify-content: center;
     padding: 20px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
 }
-.modal-overlay.active { display: flex; animation: overlayIn .22s ease; }
+.modal-overlay.active { display: flex !important; animation: overlayIn .22s ease; }
 @keyframes overlayIn { from { opacity: 0 } to { opacity: 1 } }
 .modal-content {
     position: relative;
@@ -624,7 +615,6 @@ body::before {
 /* ---------------- fx-role-badge ---------------- */
 #fx-role-badge {
     border-radius: 10px !important;
-    backdrop-filter: blur(10px);
     box-shadow: var(--elev-1);
     font-family: 'Fira Code', 'JetBrains Mono', monospace;
     color: #f87171;
