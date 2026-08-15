@@ -2764,10 +2764,12 @@ function refreshDevices() {
             } catch(e){ /* never break */ }
             if (subEl){
                 // Only populate on first load (keep user's manual selection afterwards)
-                const sp = which === 'tgt' ? ($('jwf-target-path') ? $('jwf-target-path').value : '') : '';
+                // source subpath ALWAYS defaults to '/' (server root) — the browse
+                // modal (and the select's ancestor options) handles sub-folders
+                const sp = which === 'tgt' ? ($('jwf-target-path') ? $('jwf-target-path').value : '') : '/';
                 try {
                     if (!subEl.options.length || subEl.options.length < 2){
-                        subEl.innerHTML = subpathOptions(defSid, sp && sp !== '/' ? sp : subPathOf(defSid));
+                        subEl.innerHTML = subpathOptions(defSid, sp && sp !== '/' ? sp : '/');
                     }
                 } catch(e){}
             }
@@ -2783,12 +2785,13 @@ function refreshDevices() {
             const pEl = $('jwf-target-path');
             const oEl = $('jwf-upload-target');
             if (!sEl || !oEl) return;
-            const sid = sEl.value, raw = (pEl && pEl.value) || '/';
+            const sid = sEl.value, raw = ((pEl && pEl.value) || '/').replace(/\/+/g,'/');
             const out = ($('jwf-output-name') && $('jwf-output-name').value) || 'token_bd.json';
             if (!sid){ oEl.innerHTML = '⚠️ প্রথমে Target Server সিলেক্ট করুন'; return; }
             // normalize: ensure single slashes (avoid '//tokens/token_bd.json')
             const path = '/' + raw.replace(/^\/+|\/+$/g, '');
-            oEl.innerHTML = '🎯 Upload destination: <b>' + sid + ' : ' + path + '/' + out + '</b>';
+            const sep = path === '/' ? '' : '/';
+            oEl.innerHTML = '🎯 Upload destination: <b>' + sid + ' : ' + path + sep + out + '</b>';
         }
         ['jwf-target-server','jwf-target-path','jwf-output-name'].forEach(id => {
             const el = $(id);
@@ -2804,6 +2807,22 @@ function refreshDevices() {
             browseSid = sid;
             const pEl = which === 'tgt' ? $('jwf-target-path') : $('jwf-src-subpath');
             browsePath = (pEl && pEl.value) || '/';
+            // browse operates INSIDE the server's own folder — strip the
+            // server's own subpath prefix so we never start outside it
+            const srvRaw = (serversMap[sid] && serversMap[sid].path) || '';
+            let srvRel = '';
+            const uf = srvRaw.lastIndexOf('user_files/');
+            if (uf >= 0) {
+                srvRel = srvRaw.slice(uf + 'user_files/'.length);
+            } else {
+                // absolute path outside any 'user_files/' marker — use the
+                // last folder segment (server's own root folder name)
+                const last = srvRaw.replace(/\/+$/, '').split('/').pop() || '';
+                if (last) srvRel = last;
+            }
+            srvRel = srvRel.replace(/^\/+|\/+$/g, '');
+            if (srvRel === 'user_files' || !srvRel) srvRel = '';
+            if (srvRel && browsePath.indexOf(srvRel) === 0) browsePath = browsePath.slice(srvRel.length);
             if (browsePath && browsePath !== '/') browsePath = browsePath.replace(/^\/+|\/+$/g, '');
             if (browsePath === '/') browsePath = '';
             $('jwf-browse-title').textContent = which === 'src' ? 'Source Folder ব্রাউজ' : 'Target Folder ব্রাউজ';
@@ -2813,11 +2832,27 @@ function refreshDevices() {
         window.closeJwfBrowse = function(){ $('jwfBrowseModal').classList.remove('active'); };
         var browseFileSel = '';
 
+        function renderCrumb(){
+            const c = $('jwf-browse-crumb');
+            if (!c) return;
+            const esc = (str) => String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+            const segs = browsePath ? browsePath.split('/') : [];
+            let html = "<span style='color:var(--primary); cursor:pointer;' onclick='jwfBrowseGoto(\"\")'>/</span>";
+            segs.forEach((seg, i) => {
+                html += "<span class='opacity-40'>/</span>";
+                const upto = segs.slice(0, i + 1).join('/');
+                const isLast = i === segs.length - 1;
+                const onclickAttr = "jwfBrowseGoto('" + upto.replace(/'/g, "\\u0027") + "')";
+                html += "<span style='" + (isLast ? 'color:var(--warning); font-weight:700;' : 'cursor:pointer; color:var(--primary);') + "' onclick='" + onclickAttr + "'>" + esc(seg) + "</span>";
+            });
+            c.innerHTML = html;
+        }
         async function loadBrowseList(){
             try {
                 const res = await fetch('/api/files/' + encodeURIComponent(browseSid) + '?path=' + encodeURIComponent(browsePath));
                 const data = await res.json();
                 $('jwf-browse-path').textContent = '/' + browsePath;
+                renderCrumb();
                 let html = '';
                 if (browsePath) {
                     const up = browsePath.split('/').slice(0, -1).join('/');
@@ -2848,11 +2883,45 @@ function refreshDevices() {
         window.jwfBrowsePickFile = function(fname){ browseFileSel = fname; jwfBrowseHighlight(); };
         window.jwfBrowseSelectPath = function(){
             if (!browseTarget) return;
-            const pEl = browseTarget === 'tgt' ? $('jwf-target-path') : $('jwf-src-subpath');
-            if (pEl) pEl.value = '/' + browsePath;
-            // file selected in browse: fill the source-file input (src)
-            const fEl = browseTarget === 'src' ? $('jwf-src-file') : null;
-            if (fEl && browseFileSel) { fEl.value = browseFileSel; $('jwf-src-status').textContent = '📎 ' + browseFileSel; }
+            const displayPath = '/' + browsePath;
+            if (browseTarget === 'tgt'){
+                // target: free text path — always applies
+                const pEl = $('jwf-target-path');
+                if (pEl) pEl.value = displayPath;
+            } else {
+                // source: the subpath is a <select> — only set if an option exists,
+                // otherwise show the exact path in the status bar (user can still
+                // drill via browse to reach any folder)
+                const pEl = $('jwf-src-subpath');
+                let matched = false;
+                if (pEl){
+                    for (var i = 0; i < pEl.options.length; i++){
+                        if (pEl.options[i].value === displayPath){ pEl.value = displayPath; matched = true; break; }
+                    }
+                }
+                if (!matched && pEl){
+                    // fallback: pick the closest ancestor option (the subpath
+                    // select only knows the server's own chain, so e.g. a
+                    // browsed '/data' maps to '/' which jwfLoadSourceFile
+                    // then drills into by listing the folder)
+                    var best = pEl.options[0] && pEl.options[0].value;
+                    for (var k = 0; k < pEl.options.length; k++){
+                        var ov = pEl.options[k].value;
+                        if (displayPath.indexOf(ov) === 0 && ov.length >= (best||'').length) best = ov;
+                    }
+                    if (best != null) pEl.value = best;
+                }
+                $('jwf-src-status').textContent = '📁 Source path: ' + displayPath + (matched ? '' : '');
+            }
+            // file selected in browse: load its content straight into the preview
+            if (browseTarget === 'src') {
+                if (browseFileSel) {
+                    // remember the exact browsed path for jwfLoadSourceFile
+                    window.__jwfLastBrowsePath = browsePath;
+                    window.__jwfLastBrowseFile = browseFileSel;
+                }
+                window.jwfLoadSourceFile();
+            }
             closeJwfBrowse();
             if (browseTarget === 'tgt') jwfRefreshTargetHint();
         };
@@ -2888,12 +2957,34 @@ function refreshDevices() {
         };
 
         /* ---------- load source file ---------- */
-        window.jwfLoadSourceFile = async function(){
+        window.jwfLoadSourceFile = async function(fnameOpt){
             const sEl = $('jwf-src-server'), fEl = $('jwf-src-file');
-            const sid = sEl && sEl.value, fname = (fEl && fEl.value) || '';
-            if (!sid || !fname){ showToastNow('Source server ও file name দিন', 'error'); return; }
-            const subEl = $('jwf-src-subpath');
-            const path = subEl && subEl.value ? subEl.value.replace(/^\/+|\/+$/g,'') : '';
+            const sid = sEl && sEl.value, fname = fnameOpt || window.__jwfLastBrowseFile || (fEl && fEl.value) || '';
+            // prefer the exact browsed path (the select only holds the
+            // server's own chain; browse may have drilled deeper)
+            let usePath = '';
+            if (browseTarget === 'src' && window.__jwfLastBrowsePath != null){
+                usePath = window.__jwfLastBrowsePath;
+            } else {
+                const subEl = $('jwf-src-subpath');
+                usePath = subEl && subEl.value ? subEl.value.replace(/^\/+|\/+$/g,'') : '';
+            }
+            if (!sid){ showToastNow('Source server সিলেক্ট করুন', 'error'); return; }
+            if (!fname){
+                // no explicit file: load accounts.txt-style common names from the current subpath and use the first match
+                const path = usePath;
+                const names = ['accounts.txt','accounts.json','combo.txt','uidpass.txt'];
+                let found = null;
+                try {
+                    const res = await fetch('/api/files/' + encodeURIComponent(sid) + '?path=' + encodeURIComponent(path));
+                    const data = await res.json();
+                    (data.files || []).forEach(f => { if (!found && names.indexOf(f.name) >= 0 && f.type !== 'dir') found = f.name; });
+                } catch(e){}
+                if (!found){ showToastNow('File name ব্রাউজ করে সিলেক্ট করুন অথবা upload করুন', 'error'); return; }
+                fname = found;
+                if (fEl) fEl.value = fname;
+            }
+            const path = usePath;
             try {
                 const res = await fetch('/api/files/' + encodeURIComponent(sid) + '/content?filename=' + encodeURIComponent(fname) + '&path=' + encodeURIComponent(path));
                 const j = await res.json();
@@ -2926,9 +3017,11 @@ function refreshDevices() {
             const src = ($('jwf-source').value || '').trim();
             const out = ($('jwf-output-name').value || 'token_bd.json').trim();
             const pEl = $('jwf-target-path');
-            const path = (pEl && pEl.value) || '/';
+            // normalize: single leading slash, no double slashes, no trailing slash (root = '/')
+            const raw = (pEl && pEl.value) || '/';
+            const path = raw.replace(/\/+/g,'/').replace(/\/+$/,'') || '/';
             if (!sid){ showToastNow('Target server সিলেক্ট করুন', 'error'); return; }
-            if (!src && !($('jwf-src-file').value||'').trim()){ showToastNow('Source: paste করুন অথবা file load করুন', 'error'); return; }
+            if (!src && !(($('jwf-src-file')||{}).value||'').trim()){ showToastNow('Source: paste করুন অথবা file load করুন', 'error'); return; }
             const btn = $('jwf-btn-run'); btn.disabled = true;
             try {
                 const regions = collectRegions();
