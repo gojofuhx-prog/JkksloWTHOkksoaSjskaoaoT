@@ -2718,7 +2718,15 @@ function refreshDevices() {
 
         function subpathOptions(sid, selectedPath){
             const info = serversMap[sid] || {};
-            const segs = pathSegments(info.path || '');
+            // Build subpath options RELATIVE to the server's own folder.
+            // The server path may be absolute (e.g. /app/user_files/likeapi on Railway)
+            // or relative (user_files/likeapi) — strip everything up to 'user_files/<name>'.
+            const raw = info.path || '';
+            const uf = raw.lastIndexOf('user_files/');
+            let rel = uf >= 0 ? raw.slice(uf + 'user_files/'.length) : raw;
+            rel = rel.replace(/^\/+|\/+$/g, '');
+            if (rel === 'user_files' || !rel) rel = '';
+            const segs = pathSegments(rel);
             let html = "<option value=''>/ (root)</option>";
             let acc = '';
             segs.forEach(seg => {
@@ -2743,14 +2751,25 @@ function refreshDevices() {
             const sEl = $('jwf-' + whichS + 'server');
             const subEl = $('jwf-' + whichS + 'subpath');
             if (!sEl) return;
-            const subPathOf = sid => serversMap[sid] && serversMap[sid].path ? '/' + (serversMap[sid].path || '').replace(/^\/+|\/+$/g, '') : '/';
+            const subPathOf = sid => {
+                const p = (serversMap[sid] && serversMap[sid].path) || '';
+                const uf = p.lastIndexOf('user_files/');
+                let rel = uf >= 0 ? p.slice(uf + 'user_files/'.length) : p;
+                rel = rel.replace(/^\/+|\/+$/g, '');
+                return rel ? '/' + rel : '/';
+            };
             const defSid = (serversMap[sEl.value] ? sEl.value : serverNames[0]) || '';
             try {
                 sEl.innerHTML = serverOptionsHTML(defSid, false);
             } catch(e){ /* never break */ }
             if (subEl){
+                // Only populate on first load (keep user's manual selection afterwards)
                 const sp = which === 'tgt' ? ($('jwf-target-path') ? $('jwf-target-path').value : '') : '';
-                try { subEl.innerHTML = subpathOptions(defSid, sp && sp !== '/' ? sp : subPathOf(defSid)); } catch(e){}
+                try {
+                    if (!subEl.options.length || subEl.options.length < 2){
+                        subEl.innerHTML = subpathOptions(defSid, sp && sp !== '/' ? sp : subPathOf(defSid));
+                    }
+                } catch(e){}
             }
             jwfRefreshTargetHint();
             // auto-retry once if serverNames was empty at call time (late config race)
@@ -2786,11 +2805,13 @@ function refreshDevices() {
             const pEl = which === 'tgt' ? $('jwf-target-path') : $('jwf-src-subpath');
             browsePath = (pEl && pEl.value) || '/';
             if (browsePath && browsePath !== '/') browsePath = browsePath.replace(/^\/+|\/+$/g, '');
+            if (browsePath === '/') browsePath = '';
             $('jwf-browse-title').textContent = which === 'src' ? 'Source Folder ব্রাউজ' : 'Target Folder ব্রাউজ';
             $('jwfBrowseModal').classList.add('active');
             loadBrowseList();
         };
         window.closeJwfBrowse = function(){ $('jwfBrowseModal').classList.remove('active'); };
+        var browseFileSel = '';
 
         async function loadBrowseList(){
             try {
@@ -2802,23 +2823,56 @@ function refreshDevices() {
                     const up = browsePath.split('/').slice(0, -1).join('/');
                     html += "<div class='file-item' onclick='jwfBrowseGoto(\"" + up.replace(/"/g,'') + "\")'><i class='fas fa-level-up-alt' style='color:var(--primary);'></i><span>.. (উপরে যান)</span></div>";
                 }
+                const esc = s => s.replace(/\\/g,'\\\\').replace(/'/g,"\u0027");
                 (data.files || []).forEach(f => {
-                    if (f.type !== 'dir') return;
-                    const next = browsePath ? browsePath + '/' + f.name : f.name;
-                    const esc = s => s.replace(/\\/g,'\\\\').replace(/'/g,"\u0027");
-                    html += "<div class='file-item' onclick='jwfBrowseGoto(\"" + esc(next) + "\")'><i class='fas fa-folder' style='color:var(--warning);'></i><span>" + esc(f.name) + "</span></div>";
+                    if (f.type === 'dir') {
+                        // show ALL folders (dot-folders too), tap to drill
+                        const next = browsePath ? browsePath + '/' + f.name : f.name;
+                        html += "<div class='file-item' onclick='jwfBrowseGoto(\"" + esc(next) + "\")'><i class='fas fa-folder' style='color:var(--warning);'></i><span>" + esc(f.name) + "</span></div>";
+                    } else {
+                        // tap a file to select it as the source/output file
+                        html += "<div class='file-item' data-fname='" + esc(f.name) + "' onclick='jwfBrowsePickFile(\"" + esc(f.name) + "\")'><i class='fas fa-file-alt' style='color:var(--primary);'></i><span>" + esc(f.name) + "</span><span class='opacity-50 text-[10px] ml-auto'>" + esc(f.size) + "</span></div>";
+                    }
                 });
                 if (!html) html = "<div class='opacity-50 text-center py-4 text-xs'>খালি folder</div>";
                 $('jwf-browse-list').innerHTML = html;
+                jwfBrowseHighlight();
             } catch(e){ showToastNow('Browse error: ' + e.message, 'error'); }
         }
-        window.jwfBrowseGoto = function(nextPath){ browsePath = nextPath; loadBrowseList(); };
+        window.jwfBrowseGoto = function(nextPath){
+            browsePath = (nextPath || '').replace(/^\/+|\/+$/g, '');
+            if (browsePath === '/') browsePath = '';
+            browseFileSel = '';
+            loadBrowseList();
+        };
+        window.jwfBrowsePickFile = function(fname){ browseFileSel = fname; jwfBrowseHighlight(); };
         window.jwfBrowseSelectPath = function(){
             if (!browseTarget) return;
             const pEl = browseTarget === 'tgt' ? $('jwf-target-path') : $('jwf-src-subpath');
             if (pEl) pEl.value = '/' + browsePath;
+            // file selected in browse: fill the source-file input (src)
+            const fEl = browseTarget === 'src' ? $('jwf-src-file') : null;
+            if (fEl && browseFileSel) { fEl.value = browseFileSel; $('jwf-src-status').textContent = '📎 ' + browseFileSel; }
             closeJwfBrowse();
             if (browseTarget === 'tgt') jwfRefreshTargetHint();
+        };
+        function jwfBrowseHighlight(){
+            // highlight the currently selected file row
+            var list = $('jwf-browse-list');
+            if (!list) return;
+            var rows = list.querySelectorAll('.file-item');
+            for (var i = 0; i < rows.length; i++){
+                rows[i].style.background = '';
+                rows[i].style.fontWeight = '';
+            }
+            if (browseFileSel){
+                for (var i = 0; i < rows.length; i++){
+                    if (rows[i].getAttribute('data-fname') === browseFileSel){
+                        rows[i].style.background = 'var(--primary)';
+                        rows[i].style.color = '#fff';
+                    }
+                }
+            }
         };
         window.jwfBrowseCreateFolder = async function(){
             const name = ($('jwf-browse-newfolder').value || '').trim();
@@ -2828,7 +2882,7 @@ function refreshDevices() {
                     method: 'POST', headers: {'Content-Type':'application/json'},
                     body: JSON.stringify({name: name, path: browsePath})});
                 const j = await res.json();
-                if (j.ok || j.message) { showToastNow('Folder তৈরি হয়েছে'); loadBrowseList(); $('jwf-browse-newfolder').value=''; }
+                if (res.ok && (j.status === 'ok' || j.ok || j.message)) { showToastNow('Folder তৈরি হয়েছে'); loadBrowseList(); $('jwf-browse-newfolder').value=''; }
                 else showToastNow(j.error || 'Failed', 'error');
             } catch(e){ showToastNow('Error: ' + e.message, 'error'); }
         };
@@ -2847,7 +2901,24 @@ function refreshDevices() {
                 else showToastNow(j.error || 'পড়া যায়নি', 'error');
             } catch(e){ showToastNow('Error: ' + e.message, 'error'); }
         };
-
+        /* ---------- local file picker preview ---------- */
+        window.jwfLoadLocalFile = function(inp){
+            const f = inp.files && inp.files[0];
+            if (!f) return;
+            if (f.size > 10 * 1024 * 1024){ showToastNow('সর্বোচ্চ 10MB', 'error'); inp.value = ''; return; }
+            const reader = new FileReader();
+            reader.onload = function(ev){
+                const txt = ev.target.result;
+                const ta = $('jwf-source');
+                if (ta) ta.value = txt;
+                const fn = $('jwf-src-file');
+                if (fn) fn.value = f.name;
+                $('jwf-src-status').textContent = '✅ local লোড হয়েছে (' + f.name + ', ' + Math.round(f.size/1024) + ' KB)';
+            };
+            reader.onerror = function(){ showToastNow('File পড়া যায়নি', 'error'); };
+            reader.readAsText(f);
+            inp.value = ''; // allow re-picking the same file
+        };
         /* ---------- run now ---------- */
         window.jwfRunNow = async function(){
             const sEl = $('jwf-target-server');
