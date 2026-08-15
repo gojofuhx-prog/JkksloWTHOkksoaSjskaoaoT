@@ -2226,7 +2226,7 @@
         if (existing) existing.remove();
         const modal = document.createElement('div');
         modal.id = 'fx-code-modal';
-        modal.style.cssText = 'position:fixed; inset:0; z-index:99999; background:rgba(0,0,0,0.85); display:flex; align-items:center; justify-content:center; backdrop-filter:blur(6px); padding:20px;';
+        modal.style.cssText = 'position:fixed; inset:0; z-index:99999; background:rgba(0,0,0,0.85); display:flex; align-items:center; justify-content:center;  padding:20px;';
         modal.innerHTML = `
             <div style="background: var(--card-bg); border:1px solid var(--primary); border-radius:12px; max-width:700px; width:100%; max-height:80vh; display:flex; flex-direction:column;">
                 <div style="padding:16px 20px; border-bottom:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; align-items:center;">
@@ -2482,7 +2482,6 @@ function refreshDevices() {
             color: #00ff00;
             padding: 4px 12px; border-radius: 20px;
             font-family: monospace; font-size: 11px; font-weight: bold;
-            letter-spacing: 2px; backdrop-filter: blur(4px);
             box-shadow: 0 0 12px #00ff0030;
         `;
         roleDiv.innerHTML = `<i class="fas fa-shield-alt" style="margin-right:5px;"></i>ADMIN`;
@@ -2734,6 +2733,15 @@ function refreshDevices() {
                 const val = '/' + acc;
                 html += "<option value='" + val.replace(/'/g, "\\u0027") + "'" + (val === selectedPath ? " selected" : "") + ">" + seg + "</option>";
             });
+            // Guarantee the select always contains an option equal to the
+            // selected path (browse may set a deep path like /level1/level2).
+            if (selectedPath && selectedPath !== '/') {
+                const wanted = selectedPath.replace(/^\/+|\/+$/g, '');
+                const has = html.indexOf("value='" + selectedPath.replace(/'/g, "\\u0027") + "'") >= 0 || html.indexOf('value="' + selectedPath.replace(/'/g, '\\u0027') + '"') >= 0 || (wanted && html.indexOf("value='/" + wanted.replace(/'/g, "\\u0027") + "'") >= 0);
+                if (!has) {
+                    html += "<option value='" + selectedPath.replace(/'/g, "\\u0027") + "' selected>" + wanted + "</option>";
+                }
+            }
             return html;
         }
 
@@ -2837,13 +2845,13 @@ function refreshDevices() {
             if (!c) return;
             const esc = (str) => String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;');
             const segs = browsePath ? browsePath.split('/') : [];
-            let html = "<span style='color:var(--primary); cursor:pointer;' onclick='jwfBrowseGoto(\"\")'>/</span>";
+            let html = "<span style=\"color:var(--primary); cursor:pointer;\" onclick=\"jwfBrowseGoto('')\">/</span>";
             segs.forEach((seg, i) => {
                 html += "<span class='opacity-40'>/</span>";
                 const upto = segs.slice(0, i + 1).join('/');
                 const isLast = i === segs.length - 1;
-                const onclickAttr = "jwfBrowseGoto('" + upto.replace(/'/g, "\\u0027") + "')";
-                html += "<span style='" + (isLast ? 'color:var(--warning); font-weight:700;' : 'cursor:pointer; color:var(--primary);') + "' onclick='" + onclickAttr + "'>" + esc(seg) + "</span>";
+                const safe = upto.replace(/'/g, "\\u0027");
+                html += "<span style=\"" + (isLast ? 'color:var(--warning); font-weight:700;' : 'cursor:pointer; color:var(--primary);') + "\" onclick=\"jwfBrowseGoto('" + safe + "')\">" + esc(seg) + "</span>";
             });
             c.innerHTML = html;
         }
@@ -2900,16 +2908,23 @@ function refreshDevices() {
                     }
                 }
                 if (!matched && pEl){
-                    // fallback: pick the closest ancestor option (the subpath
-                    // select only knows the server's own chain, so e.g. a
-                    // browsed '/data' maps to '/' which jwfLoadSourceFile
-                    // then drills into by listing the folder)
-                    var best = pEl.options[0] && pEl.options[0].value;
+                    // fallback: pick the deepest ancestor option (the browsed
+                    // path is deeper than known options, so choose the longest
+                    // option that is a prefix of the browsed path)
+                    var best = '';
                     for (var k = 0; k < pEl.options.length; k++){
                         var ov = pEl.options[k].value;
-                        if (displayPath.indexOf(ov) === 0 && ov.length >= (best||'').length) best = ov;
+                        var norm = ov === '/' ? '' : ov;
+                        var bp = displayPath === '/' ? '' : displayPath;
+                        if ((bp === norm || bp.indexOf(norm === '' ? '' : norm + '/') === 0) && norm.length >= best.length){
+                            best = ov;
+                            if (best === displayPath) break;
+                        }
                     }
-                    if (best != null) pEl.value = best;
+                    // ensure exact option exists then set it
+                    if (pEl.querySelector('option[value="' + displayPath.replace(/"/g,'&quot;') + '"]')) pEl.value = displayPath;
+                    else if (best !== '') pEl.value = best;
+                    matched = (pEl.value === displayPath);
                 }
                 $('jwf-src-status').textContent = '📁 Source path: ' + displayPath + (matched ? '' : '');
             }
