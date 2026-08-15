@@ -7,12 +7,26 @@ Version: 4.0.0 - ADMIN MODE (single-role system)
 import os, sys, signal, subprocess, threading, time, shutil, zipfile, py7zr
 import psutil, json, hashlib, secrets, re, platform, socket, datetime, base64, math
 import requests
-from flask import Flask, render_template, render_template_string, request, jsonify, redirect, url_for, send_file, session, abort, Response
+from flask import Flask, render_template, render_template_string, request, jsonify, redirect, url_for, send_file, session, abort, Response, make_response
 from functools import wraps
 from pathlib import Path
 
 # Railway env vars (PANEL_SECRET / PANEL_USER_PASS) login override - optional
-import env_patch  # noqa
+# (env_patch মার্জ করে app.py তেই রাখা হয়েছে)
+def _apply_env_login_overrides():
+    _secret_env = (os.environ.get('PANEL_SECRET') or '').strip()
+    _userpass_env = (os.environ.get('PANEL_USER_PASS') or '').strip()
+    if not _secret_env and not _userpass_env:
+        return
+    if _secret_env and 'passwords' in CONFIG:
+        CONFIG['passwords']['secret'] = hashlib.sha256(_secret_env.encode()).hexdigest()
+    if _userpass_env and 'passwords' in CONFIG:
+        CONFIG['passwords']['user'] = hashlib.sha256(_userpass_env.encode()).hexdigest()
+    if _secret_env:
+        for _uid, _u in DEFAULT_USERS.items():
+            _u['password_hash'] = hashlib.sha256(_secret_env.encode()).hexdigest()
+
+
 
 app = Flask(__name__)
 
@@ -1058,7 +1072,7 @@ def index():
         groups.add(s.get('group', 'default'))
     app_uptime = format_uptime(int(time.time() - START_TIME))
     health_map = {sid: compute_health_score(sid) for sid in SERVERS}
-    return render_template('index.html',
+    tpl = render_template('index.html',
         servers=serializable_servers, stats=stats, net_info=net_info,
         total_count=len(SERVERS), running_count=sum(1 for s in SERVERS.values() if s['status'] == 'running'),
         config=CONFIG, theme=current_theme, themes=THEMES,
@@ -1067,10 +1081,9 @@ def index():
         domains=DOMAINS, health_map=health_map,
         start_date=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(START_TIME)),
         groups=sorted(groups), base_dir=BASE_DIR if is_admin else '***')
-
-# =============================================================================
-# READ-ONLY APIs (Both ADMIN and USER can access)
-# =============================================================================
+    resp = make_response(tpl)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 @app.route('/api/server/<server_id>/logs')
 @login_required
@@ -2465,6 +2478,7 @@ def serve_appjs():
         js = render_template_string(js_src, **_index_context())
         resp = make_response(js)
         resp.headers['Content-Type'] = 'application/javascript; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store'
         return resp
     except Exception:
         import traceback
@@ -2513,14 +2527,468 @@ def server_error(e):
 
 # =============================================================================
 # JWT FACTORY — panel-এর ভেতরেই JWT token generation + schedule
-# =============================================================================
+# (সব কিছু app.py তেই মার্জ করা: jwt_factory + routes + env patch)
+import uuid as _uuid
+import concurrent.futures as _cf
 try:
-    import jwt_factory_routes  # noqa
-    jwt_factory_routes.register_jwt_factory(app)
-except Exception as _e:
-    print('[JWTFactory] load failed:', _e)
+    from apscheduler.schedulers.background import BackgroundScheduler as _BGS
+except ImportError:
+    _BGS = None
 
-# =============================================================================
+JWT_API_URL = (os.environ.get('JWT_API_URL') or 'https://fiddu-jwt-token.vercel.app/token').strip()
+JWT_API_KEY = (os.environ.get('JWT_API_KEY') or 'fxfuhx-secret-key').strip()
+JWF_MAX_WORKERS = 8
+JWF_MAX_SOURCE_BYTES = 5 * 1024 * 1024  # 5 MB
+JWF_RUNS = {}
+JWF_SCHED_FILE = os.path.join(BASE_DIR, 'jwtfactory_schedules.json')
+_jwf_lock = threading.Lock()
+
+try:
+    with open(JWF_SCHED_FILE, 'r') as _f:
+        JWF_SCHEDULES = json.load(_f)
+except Exception:
+    JWF_SCHEDULES = {}
+
+_jwf_scheduler = None
+
+
+def _jwf_save_schedules():
+    try:
+        tmp = JWF_SCHED_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(JWF_SCHEDULES, f, indent=2)
+        os.replace(tmp, JWF_SCHED_FILE)
+    except Exception as e:
+        print('[JWTFactory] schedule save failed:', e)
+
+
+def _jwf_init_scheduler():
+    global _jwf_scheduler
+    if _BGS is None:
+        print('[JWTFactory] APScheduler missing — schedule runs disabled (pip install apscheduler)')
+        return None
+    if _jwf_scheduler is not None:
+        return _jwf_scheduler
+    try:
+        sched = _BGS(daemon=True)
+        sched.start()
+        for sid, sc in list(JWF_SCHEDULES.items()):
+            if sc.get('paused'):
+                continue
+            interval_hours = float(sc.get('interval_hours', 6))
+            sched.add_job(_jwf_run_schedule_job, 'interval', args=[sid],
+                          hours=interval_hours, next_run_time=None,
+                          id='jwtf_' + sid, replace_existing=True,
+                          misfire_grace_time=24 * 3600)
+        _jwf_scheduler = sched
+        print('[JWTFactory] scheduler ok, %d schedules loaded' % len(JWF_SCHEDULES))
+        return sched
+    except Exception as e:
+        print('[JWTFactory] scheduler init failed:', e)
+        return None
+
+
+def _jwf_parse_source(text):
+    """Return list of (uid, password). Supports JSON array, JSON object, uid:pass lines."""
+    text = (text or '').strip()
+    accounts = []
+    if text.startswith('['):
+        try:
+            data = json.loads(text)
+            for item in data:
+                if isinstance(item, dict):
+                    uid = item.get('uid') or item.get('UID') or item.get('uid_str')
+                    pwd = item.get('password') or item.get('Password') or item.get('pass')
+                    if uid is not None and pwd is not None:
+                        accounts.append((str(uid).strip(), str(pwd).strip()))
+            return accounts
+        except json.JSONDecodeError:
+            pass
+    if text.startswith('{'):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                for uid, pwd in data.items():
+                    if uid is not None and pwd is not None:
+                        accounts.append((str(uid).strip(), str(pwd).strip()))
+            return accounts
+        except json.JSONDecodeError:
+            pass
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ':' in line:
+            uid, _, pwd = line.partition(':')
+            if uid.strip() and pwd.strip():
+                accounts.append((uid.strip(), pwd.strip()))
+    return accounts
+
+
+def _jwf_fetch_one(uid, password):
+    try:
+        r = requests.get(JWT_API_URL, params={'uid': uid, 'password': password, 'key': JWT_API_KEY},
+                         timeout=60)
+        if r.status_code == 200:
+            j = r.json()
+            if isinstance(j, dict) and j.get('token'):
+                return {'token': j['token'], 'region': j.get('region') or 'unknown',
+                        'uid': uid, 'ok': True}
+        return {'uid': uid, 'ok': False, 'reason': 'API failed (HTTP %s)' % r.status_code}
+    except requests.RequestException as e:
+        return {'uid': uid, 'ok': False, 'reason': str(e)[:80]}
+
+
+def _jwf_process_accounts(accounts, run_id, region_split, output_name):
+    """Background worker: generate tokens + optional region-split files."""
+    total = len(accounts)
+    JWF_RUNS[run_id]['total'] = total
+    results_ok, results_fail, region_map = [], [], {}
+    done = 0
+    t0 = time.time()
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=JWF_MAX_WORKERS) as ex:
+            futures = {ex.submit(_jwf_fetch_one, uid, pwd): (uid, pwd) for uid, pwd in accounts}
+            for fut in _cf.as_completed(futures):
+                res = fut.result()
+                done += 1
+                with _jwf_lock:
+                    if res['ok']:
+                        results_ok.append(res)
+                        reg = (res['region'] or 'unknown').strip()
+                        region_map.setdefault(reg, []).append({'token': res['token']})
+                    else:
+                        results_fail.append(res)
+                    JWF_RUNS[run_id].update({
+                        'done': done,
+                        'success': len(results_ok),
+                        'failed': len(results_fail),
+                        'status': 'running',
+                        'elapsed': round(time.time() - t0, 1),
+                        'latest': 'Processing %d/%d' % (done, total),
+                    })
+    except Exception as e:
+        with _jwf_lock:
+            JWF_RUNS[run_id]['status'] = 'error'
+            JWF_RUNS[run_id]['error'] = str(e)[:200]
+        return
+    try:
+        region_files = {}
+        if region_split:
+            target = region_split
+            for reg, toks in region_map.items():
+                safe = re.sub(r'[^A-Za-z0-9_-]', '', reg)[:24] or 'unknown'
+                fname = 'accounts_%s.json' % safe
+                spec = target.get(safe) or target.get(reg)
+                _jwf_save_tokens_file(fname, toks, spec)
+                region_files[reg] = fname
+        main_spec = region_split.get('__main__') if isinstance(region_split, dict) else None
+        if main_spec is None:
+            main_spec = {'server_id': None, 'path': '', 'filename': output_name}
+        main_spec['filename'] = output_name
+        _jwf_save_tokens_file(output_name, results_ok, main_spec)
+        with _jwf_lock:
+            JWF_RUNS[run_id].update({
+                'status': 'done',
+                'done': done,
+                'success': len(results_ok),
+                'failed': len(results_fail),
+                'finished': datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'),
+                'region_files': region_files,
+                'latest': 'Done — %d success, %d failed' % (len(results_ok), len(results_fail)),
+            })
+    except Exception as e:
+        with _jwf_lock:
+            JWF_RUNS[run_id].update({
+                'status': 'error',
+                'error': ('Run exception: ' + str(e))[:300],
+                'latest': 'Error — ' + str(e)[:80],
+            })
+        return
+
+
+def _jwf_save_tokens_file(filename, tokens, spec):
+    """Save token list to the chosen server+path, or local fallback."""
+    content = json.dumps(tokens, indent=2)
+    ok, note = False, ''
+    if spec and spec.get('server_id'):
+        sid = spec['server_id']
+        subpath = (spec.get('path') or '').strip()
+        out_name = (spec.get('filename') or filename).strip()
+        try:
+            if sid in SERVERS:
+                raw = SERVERS[sid]['path']
+                base = raw if os.path.isabs(raw) else os.path.join(BASE_DIR, raw)
+                _sub = (subpath or '').lstrip('/').rstrip('/')
+                if _sub.startswith('user_files/'):
+                    _target = os.path.normpath(os.path.join(BASE_DIR, _sub))
+                else:
+                    _target = os.path.normpath(os.path.join(base, _sub)) if _sub else base
+                target_dir = _target
+                if os.path.realpath(target_dir).startswith(os.path.realpath(BASE_DIR)):
+                    os.makedirs(target_dir, exist_ok=True)
+                    with open(os.path.join(target_dir, out_name), 'w') as f:
+                        f.write(content)
+                    try:
+                        log_activity('JWT Factory', 'Saved %s -> %s:%s' % (out_name, sid, subpath), 'admin')
+                    except Exception:
+                        pass
+                    print('[JWTFactory] SAVE OK ->', os.path.join(target_dir, out_name), flush=True)
+                    ok, note = True, '%s@%s:%s' % (out_name, sid, subpath)
+        except Exception as e:
+            print('[JWTFactory] SAVE DEBUG spec=', spec, 'err=', e, flush=True)
+            note = 'save failed: %s' % str(e)[:120]
+    if not ok:
+        try:
+            local = os.path.join(os.path.join(BASE_DIR, 'user_files'), filename)
+            with open(local, 'w') as f:
+                f.write(content)
+            note = 'local fallback: %s' % local
+            ok = True
+        except Exception as e:
+            note = 'local save failed: %s' % str(e)[:120]
+    return ok, note
+
+
+def _jwf_start_run(server_id, subpath, source_text, output_name, region_map_cfg):
+    """region_map_cfg: list of {region, server_id, path, filename} — optional."""
+    sid = server_id
+    run_id = 'run_' + _uuid.uuid4().hex[:10]
+    accounts = _jwf_parse_source(source_text)
+    if not accounts:
+        return {'error': 'কোনো valid account (uid:pass) পাওয়া যায়নি'}
+    region_cfg = {'__main__': {'server_id': sid, 'path': (subpath or '').strip().lstrip('/'), 'filename': output_name}}
+    if region_map_cfg:
+        for rc in region_map_cfg:
+            key = (rc.get('region') or 'unknown').strip()
+            region_cfg[key] = {'server_id': rc.get('server_id') or sid,
+                               'path': (rc.get('path') or subpath or '').strip().lstrip('/'),
+                               'filename': rc.get('filename') or ('accounts_%s.json' % key)}
+    with _jwf_lock:
+        JWF_RUNS[run_id] = {
+            'run_id': run_id, 'total': 0, 'done': 0, 'success': 0, 'failed': 0,
+            'status': 'running', 'started': datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'),
+            'server_id': sid, 'subpath': subpath, 'output_name': output_name,
+        }
+    threading.Thread(target=_jwf_process_accounts, args=(accounts, run_id, region_cfg, output_name), daemon=True).start()
+    return {'run_id': run_id, 'total': len(accounts), 'message': 'প্রসেসিং শুরু হয়েছে (%d accounts)' % len(accounts)}
+
+
+def _jwf_run_schedule_job(sid):
+    sc = JWF_SCHEDULES.get(sid)
+    if not sc or sc.get('paused'):
+        return
+    try:
+        server_id = sc.get('server_id')
+        subpath = (sc.get('path') or '').strip().lstrip('/')
+        out_name = (sc.get('output_name') or 'token_bd.json').strip()
+        if server_id not in SERVERS:
+            return
+        base = SERVERS[server_id]['path']
+        src_path = os.path.normpath(os.path.join(base, (sc.get('source_path') or ''), sc.get('source_file') or ''))
+        if not os.path.isfile(src_path):
+            return
+        with open(src_path, encoding='utf-8', errors='ignore') as f:
+            text = f.read()
+        if len(text) > JWF_MAX_SOURCE_BYTES:
+            text = text[:JWF_MAX_SOURCE_BYTES]
+        res = _jwf_start_run(server_id, subpath, text, out_name, sc.get('regions'))
+        sc['last_run'] = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+        sc['last_run_id'] = res.get('run_id', '')
+        _jwf_save_schedules()
+    except Exception as e:
+        print('[JWTFactory] schedule job error:', e)
+
+
+def _jwf_list_schedules():
+    rows = []
+    for sid, sc in JWF_SCHEDULES.items():
+        rows.append({
+            'id': sid,
+            'name': sc.get('name', ''),
+            'source_file': sc.get('source_file'),
+            'server_id': sc.get('server_id'),
+            'path': sc.get('path', ''),
+            'output_name': sc.get('output_name', 'token_bd.json'),
+            'interval_hours': float(sc.get('interval_hours', 6)),
+            'paused': bool(sc.get('paused')),
+            'last_run': sc.get('last_run'),
+            'last_run_stats': sc.get('last_run_stats'),
+            'next_run': sc.get('next_run'),
+        })
+    return rows
+
+
+def _jwf_create_schedule(data):
+    sid = 'sc_' + _uuid.uuid4().hex[:8]
+    sc = {
+        'name': (data.get('name') or 'Schedule %s' % sid).strip(),
+        'source_file': (data.get('source_file') or '').strip(),
+        'source_path': (data.get('source_path') or '').strip(),
+        'server_id': data.get('server_id', ''),
+        'path': (data.get('path') or '').strip(),
+        'output_name': (data.get('output_name') or 'token_bd.json').strip(),
+        'interval_hours': float(data.get('interval_hours', 6)),
+        'paused': False,
+        'regions': data.get('regions') or [],
+    }
+    if not sc['server_id'] or not sc['source_file']:
+        return {'error': 'server_id ও source_file দরকার'}
+    JWF_SCHEDULES[sid] = sc
+    _jwf_save_schedules()
+    _jwf_reschedule(sid)
+    return {'id': sid, 'name': sc['name']}
+
+
+def _jwf_update_schedule(sid, data):
+    sc = JWF_SCHEDULES.get(sid)
+    if not sc:
+        return {'error': 'Schedule নেই'}
+    for key in ('name', 'source_file', 'source_path', 'server_id', 'path',
+                'output_name', 'interval_hours', 'paused', 'regions'):
+        if key in data:
+            sc[key] = data[key]
+    _jwf_save_schedules()
+    _jwf_reschedule(sid)
+    return {'ok': True}
+
+
+def _jwf_delete_schedule(sid):
+    JWF_SCHEDULES.pop(sid, None)
+    _jwf_save_schedules()
+    if _jwf_scheduler:
+        try:
+            _jwf_scheduler.remove_job('jwtf_' + sid)
+        except Exception:
+            pass
+    return {'ok': True}
+
+
+def _jwf_reschedule(sid):
+    sched = _jwf_init_scheduler()
+    sc = JWF_SCHEDULES.get(sid)
+    if not sched or not sc:
+        return
+    try:
+        sched.remove_job('jwtf_' + sid)
+    except Exception:
+        pass
+    if not sc.get('paused'):
+        sched.add_job(_jwf_run_schedule_job, 'interval', args=[sid],
+                      hours=float(sc.get('interval_hours', 6)), id='jwtf_' + sid,
+                      replace_existing=True, misfire_grace_time=24 * 3600)
+        nxt = datetime.datetime.utcnow().timestamp() + float(sc.get('interval_hours', 6)) * 3600
+        sc['next_run'] = datetime.datetime.utcfromtimestamp(nxt).strftime('%Y-%m-%d %H:%M UTC')
+    else:
+        sc['next_run'] = 'Paused'
+    _jwf_save_schedules()
+
+
+def _jwf_schedule_action(sid, action):
+    sc = JWF_SCHEDULES.get(sid)
+    if not sc:
+        return {'error': 'Schedule নেই'}
+    if action == 'run':
+        _jwf_run_schedule_job(sid)
+        return {'ok': True, 'message': 'এখনই রান শুরু'}
+    if action == 'pause':
+        sc['paused'] = True
+        _jwf_reschedule(sid)
+        return {'ok': True}
+    if action == 'resume':
+        sc['paused'] = False
+        _jwf_reschedule(sid)
+        return {'ok': True}
+    return {'error': 'Unknown action'}
+
+
+# JWT Factory API routes (register_jwt_factory -> inlined)
+@app.route('/api/jwtfactory/run', methods=['POST'])
+def jwf_run():
+    data = request.get_json(force=True, silent=True) or {}
+    res = _jwf_start_run(
+        server_id=data.get('server_id', ''),
+        subpath=(data.get('path') or '').strip(),
+        source_text=data.get('source') or '',
+        output_name=(data.get('output_name') or 'jwt_token.json').strip(),
+        region_map_cfg=data.get('regions'),
+    )
+    if 'error' in res:
+        return jsonify(res), 400
+    return jsonify(res)
+
+
+@app.route('/api/jwtfactory/progress/<run_id>')
+def jwf_progress(run_id):
+    r = JWF_RUNS.get(run_id)
+    if not r:
+        return jsonify({'error': 'run not found'}), 404
+    if r.get('status') == 'running' and r.get('started'):
+        try:
+            _st = datetime.datetime.strptime(r['started'], '%Y-%m-%d %H:%M UTC')
+            if (datetime.datetime.utcnow() - _st).total_seconds() > 300:
+                r['status'] = 'error'
+                r['latest'] = 'Run stuck (timed out) — আবার Process Now চাপুন'
+        except Exception:
+            pass
+    return jsonify(r)
+
+
+@app.route('/api/jwtfactory/runs')
+def jwf_runs():
+    return jsonify({'runs': list(JWF_RUNS.values())[-20:]})
+
+
+@app.route('/api/jwtfactory/schedules')
+def jwf_list_schedules_route():
+    return jsonify({'schedules': _jwf_list_schedules()})
+
+
+@app.route('/api/jwtfactory/schedules', methods=['POST'])
+def jwf_create_schedule_route():
+    data = request.get_json(force=True, silent=True) or {}
+    res = _jwf_create_schedule(data)
+    return (jsonify(res), 400) if 'error' in res else jsonify(res)
+
+
+@app.route('/api/jwtfactory/schedules/<sid>', methods=['PUT'])
+def jwf_update_schedule_route(sid):
+    data = request.get_json(force=True, silent=True) or {}
+    res = _jwf_update_schedule(sid, data)
+    return (jsonify(res), 400) if 'error' in res else jsonify(res)
+
+
+@app.route('/api/jwtfactory/schedules/<sid>', methods=['DELETE'])
+def jwf_delete_schedule_route(sid):
+    return jsonify(_jwf_delete_schedule(sid))
+
+
+@app.route('/api/jwtfactory/schedules/<sid>/action', methods=['POST'])
+def jwf_schedule_action_route(sid):
+    data = request.get_json(force=True, silent=True) or {}
+    return jsonify(_jwf_schedule_action(sid, data.get('action', '')))
+
+
+# Scheduler lazy-init on first request (Flask 3 removed before_first_request)
+_jwf_init_done = {'v': False}
+
+
+def _jwf_lazy_init():
+    if not _jwf_init_done['v']:
+        _jwf_init_done['v'] = True
+        _jwf_init_scheduler()
+
+
+@app.before_request
+def _jwf_before_request():
+    _jwf_lazy_init()
+
+
+@app.route('/_jwf_init')
+def _jwf_init():
+    _jwf_init_scheduler()
+    return jsonify({'ok': True})
+
 # MAIN
 # =============================================================================
 
