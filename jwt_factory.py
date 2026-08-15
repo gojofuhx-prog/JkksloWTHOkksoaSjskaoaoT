@@ -291,7 +291,7 @@ def _run_schedule_job(sid):
         source_file = sc.get('source_file')
         server_id = sc.get('server_id')
         subpath = (sc.get('path') or '').strip().lstrip('/')
-        out_name = (sc.get('output_name') or 'jwt_token.json').strip()
+        out_name = (sc.get('output_name') or 'token_bd.json').strip()
         from app import SERVERS
         if server_id not in SERVERS:
             return
@@ -322,7 +322,7 @@ def list_schedules():
             'source_file': sc.get('source_file'),
             'server_id': sc.get('server_id'),
             'path': sc.get('path', ''),
-            'output_name': sc.get('output_name', 'jwt_token.json'),
+            'output_name': sc.get('output_name', 'token_bd.json'),
             'interval_hours': float(sc.get('interval_hours', 6)),
             'paused': bool(sc.get('paused')),
             'last_run': sc.get('last_run'),
@@ -340,7 +340,7 @@ def create_schedule(data):
         'source_path': (data.get('source_path') or '').strip(),
         'server_id': data.get('server_id', ''),
         'path': (data.get('path') or '').strip(),
-        'output_name': (data.get('output_name') or 'jwt_token.json').strip(),
+        'output_name': (data.get('output_name') or 'token_bd.json').strip(),
         'interval_hours': float(data.get('interval_hours', 6)),
         'paused': False,
         'regions': data.get('regions') or [],
