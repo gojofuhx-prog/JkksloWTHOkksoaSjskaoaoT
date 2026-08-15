@@ -1537,6 +1537,8 @@
                         <select id="jwf-src-server" class="fx-select flex-1" onchange="jwfLoadServerOptions('src')"></select>
                         <select id="jwf-src-subpath" class="fx-select flex-[2]" onchange="jwfLoadServerOptions('src')"></select>
                         <button onclick="jwfBrowse('src')" class="fx-btn fx-btn-info"><i class="fas fa-folder-open"></i> Browse</button>
+                        <button onclick="$('jwf-src-localfile').click()" class="fx-btn fx-btn-warning" title="Local file থেকে লোড"><i class="fas fa-file-import"></i></button>
+                        <input type="file" id="jwf-src-localfile" accept=".txt,.json,.js,.csv" class="hidden" onchange="jwfLoadLocalFile(this)">
                         <input type="text" id="jwf-src-file" placeholder="accounts.txt" class="fx-input flex-1">
                     </div>
                     <div class="flex gap-2 mt-2">
@@ -1668,7 +1670,7 @@
     
     <!-- ================= JWT FACTORY JS ================= -->
     
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=10"></script>
   <script>
     /* per-request Jinja config */
     window.__BASE_DIR = {{ base_dir | tojson }};
