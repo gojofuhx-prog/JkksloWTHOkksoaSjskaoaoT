@@ -2806,14 +2806,30 @@ function refreshDevices() {
             if (el) el.addEventListener('input', jwfRefreshTargetHint);
         });
 
-        /* ---------- folder browser modal ---------- */
+        /* ---------- folder browser modal ----------
+         * Config-driven so every "browse" entry point (Process Setup's
+         * source/target AND the Schedule modal's source/target) shares one
+         * implementation instead of guessing element ids from `which`.
+         * which === 'src'  -> Process Setup source (select-based subpath)
+         * which === 'tgt'  -> Process Setup target (free-text path)
+         * which === 'ssrc' -> Schedule modal source (free-text path + file)
+         * which === 'stgt' -> Schedule modal target (free-text path)
+         */
+        const JWF_BROWSE_CFG = {
+            src:  { serverEl: 'jwf-src-server',    pathEl: 'jwf-src-subpath', isSelect: true  },
+            tgt:  { serverEl: 'jwf-target-server', pathEl: 'jwf-target-path', isSelect: false },
+            ssrc: { serverEl: 'jwf-s-srcserver',   pathEl: 'jwf-s-srcpath',   isSelect: false, fileEl: 'jwf-s-srcfile' },
+            stgt: { serverEl: 'jwf-s-server',      pathEl: 'jwf-s-path',      isSelect: false },
+        };
         window.jwfBrowse = function(which){
+            const cfg = JWF_BROWSE_CFG[which];
+            if (!cfg){ return; }
             browseTarget = which;
-            const sEl = $('jwf-' + which + '-server');
+            const sEl = $(cfg.serverEl);
             const sid = sEl && sEl.value;
             if (!sid){ showToastNow('প্রথমে server সিলেক্ট করুন', 'error'); return; }
             browseSid = sid;
-            const pEl = which === 'tgt' ? $('jwf-target-path') : $('jwf-src-subpath');
+            const pEl = $(cfg.pathEl);
             browsePath = (pEl && pEl.value) || '/';
             // browse operates INSIDE the server's own folder — strip the
             // server's own subpath prefix so we never start outside it
@@ -2833,7 +2849,7 @@ function refreshDevices() {
             if (srvRel && browsePath.indexOf(srvRel) === 0) browsePath = browsePath.slice(srvRel.length);
             if (browsePath && browsePath !== '/') browsePath = browsePath.replace(/^\/+|\/+$/g, '');
             if (browsePath === '/') browsePath = '';
-            $('jwf-browse-title').textContent = which === 'src' ? 'Source Folder ব্রাউজ' : 'Target Folder ব্রাউজ';
+            $('jwf-browse-title').textContent = (which === 'src' || which === 'ssrc') ? 'Source Folder ব্রাউজ' : 'Target Folder ব্রাউজ';
             $('jwfBrowseModal').classList.add('active');
             loadBrowseList();
         };
@@ -2891,44 +2907,40 @@ function refreshDevices() {
         window.jwfBrowsePickFile = function(fname){ browseFileSel = fname; jwfBrowseHighlight(); };
         window.jwfBrowseSelectPath = function(){
             if (!browseTarget) return;
+            const cfg = JWF_BROWSE_CFG[browseTarget];
+            if (!cfg) return;
             const displayPath = '/' + browsePath;
-            if (browseTarget === 'tgt'){
-                // target: free text path — always applies
-                const pEl = $('jwf-target-path');
+            if (!cfg.isSelect){
+                // free-text path field (tgt / ssrc / stgt) — always applies exactly,
+                // any depth, no matching/guessing needed
+                const pEl = $(cfg.pathEl);
                 if (pEl) pEl.value = displayPath;
+                if (cfg.fileEl && browseFileSel){
+                    const fEl = $(cfg.fileEl);
+                    if (fEl) fEl.value = browseFileSel;
+                }
             } else {
-                // source: the subpath is a <select> — only set if an option exists,
-                // otherwise show the exact path in the status bar (user can still
-                // drill via browse to reach any folder)
-                const pEl = $('jwf-src-subpath');
-                let matched = false;
+                // source subpath is a <select> in Process Setup — ALWAYS ensure an
+                // option exists for the exact browsed path (any nesting depth) and
+                // select it, instead of falling back to a shallower ancestor
+                const pEl = $(cfg.pathEl);
                 if (pEl){
+                    let opt = null;
                     for (var i = 0; i < pEl.options.length; i++){
-                        if (pEl.options[i].value === displayPath){ pEl.value = displayPath; matched = true; break; }
+                        if (pEl.options[i].value === displayPath){ opt = pEl.options[i]; break; }
                     }
-                }
-                if (!matched && pEl){
-                    // fallback: pick the deepest ancestor option (the browsed
-                    // path is deeper than known options, so choose the longest
-                    // option that is a prefix of the browsed path)
-                    var best = '';
-                    for (var k = 0; k < pEl.options.length; k++){
-                        var ov = pEl.options[k].value;
-                        var norm = ov === '/' ? '' : ov;
-                        var bp = displayPath === '/' ? '' : displayPath;
-                        if ((bp === norm || bp.indexOf(norm === '' ? '' : norm + '/') === 0) && norm.length >= best.length){
-                            best = ov;
-                            if (best === displayPath) break;
-                        }
+                    if (!opt){
+                        opt = document.createElement('option');
+                        opt.value = displayPath;
+                        opt.textContent = browsePath || '/ (root)';
+                        pEl.appendChild(opt);
                     }
-                    // ensure exact option exists then set it
-                    if (pEl.querySelector('option[value="' + displayPath.replace(/"/g,'&quot;') + '"]')) pEl.value = displayPath;
-                    else if (best !== '') pEl.value = best;
-                    matched = (pEl.value === displayPath);
+                    pEl.value = displayPath;
                 }
-                $('jwf-src-status').textContent = '📁 Source path: ' + displayPath + (matched ? '' : '');
+                $('jwf-src-status').textContent = '📁 Source path: ' + displayPath;
             }
-            // file selected in browse: load its content straight into the preview
+            // file selected while browsing SOURCE: load its content straight into
+            // the Process Setup preview textarea
             if (browseTarget === 'src') {
                 if (browseFileSel) {
                     // remember the exact browsed path for jwfLoadSourceFile
@@ -2939,6 +2951,7 @@ function refreshDevices() {
             }
             closeJwfBrowse();
             if (browseTarget === 'tgt') jwfRefreshTargetHint();
+            if (browseTarget === 'ssrc' || browseTarget === 'stgt') jwfRefreshSchedSrcHint();
         };
         function jwfBrowseHighlight(){
             // highlight the currently selected file row
@@ -3092,16 +3105,40 @@ function refreshDevices() {
         }
 
         /* ---------- schedule modal ---------- */
+        function jwfRefreshSchedSrcHint(){
+            const hEl = $('jwf-s-src-hint');
+            if (!hEl) return;
+            const ssEl = $('jwf-s-srcserver'), sfEl = $('jwf-s-srcfile'), spEl = $('jwf-s-srcpath');
+            const ssid = ssEl && ssEl.value, fname = (sfEl && sfEl.value || '').trim();
+            const spath = ((spEl && spEl.value) || '/').replace(/\/+/g,'/');
+            if (!ssid){ hEl.textContent = '⚠️ প্রথমে Source Server সিলেক্ট করুন'; return; }
+            const sep = spath === '/' ? '' : '/';
+            hEl.textContent = '📖 Source থেকে পড়বে: ' + ssid + ' : ' + spath + (fname ? sep + fname : '');
+        }
+        window.jwfRefreshSchedSrcHint = jwfRefreshSchedSrcHint;
+        ['jwf-s-srcfile','jwf-s-srcpath'].forEach(id => {
+            const el = $(id);
+            if (el) el.addEventListener('input', jwfRefreshSchedSrcHint);
+        });
+
         window.jwfOpenScheduleModal = function(editId){
             $('jwf-edit-id').value = editId || '';
             $('jwf-sched-modal-title').textContent = editId ? 'Edit Schedule' : 'New Schedule';
+            window.__refreshJwfSnapshots();
             const sEl = $('jwf-s-server');
             sEl.innerHTML = serverOptionsHTML(serverNames[0] || '', true);
+            // Source Server defaults to the SAME account/server as the currently
+            // selected Process Setup source (or the target, as a sane default) —
+            // it's independently editable so any account's file can be scheduled
+            const ssEl = $('jwf-s-srcserver');
+            const srcDefault = ($('jwf-src-server') && $('jwf-src-server').value) || serverNames[0] || '';
+            ssEl.innerHTML = serverOptionsHTML(srcDefault, true);
             $('jwf-s-name').value=''; $('jwf-s-srcfile').value=''; $('jwf-s-srcpath').value='';
             $('jwf-s-path').value='/'; $('jwf-s-outname').value='token_bd.json'; $('jwf-s-interval').value='6';
             $('jwf-s-regions').innerHTML='';
             $('jwfSchedModal').classList.add('active');
             if (editId) fillScheduleEdit(editId);
+            else jwfRefreshSchedSrcHint();
         };
         window.closeJwfSched = function(){ $('jwfSchedModal').classList.remove('active'); };
 
@@ -3126,14 +3163,17 @@ function refreshDevices() {
                 if (!sc) return;
                 $('jwf-s-name').value = sc.name || '';
                 $('jwf-s-srcfile').value = sc.source_file || '';
-                $('jwf-s-srcpath').value = sc.path || '';   // source_path ≃ path prefix
-                const sEl = $('jwf-s-server'); sEl.value = sc.server_id || '';
+                $('jwf-s-srcpath').value = sc.source_path || '';
+                const ssEl = $('jwf-s-srcserver');
+                ssEl.innerHTML = serverOptionsHTML(sc.source_server_id || sc.server_id, true);
+                const sEl = $('jwf-s-server');
                 sEl.innerHTML = serverOptionsHTML(sc.server_id, true);
                 $('jwf-s-path').value = sc.path || '/';
                 $('jwf-s-outname').value = sc.output_name || 'token_bd.json';
                 $('jwf-s-interval').value = String(sc.interval_hours || 6);
                 $('jwf-s-regions').innerHTML = '';
                 (sc.regions || []).forEach(r => jwfAddRegionRow(r.region, r.server_id, r.path, r.filename));
+                jwfRefreshSchedSrcHint();
             } catch(e){}
         }
 
@@ -3141,6 +3181,7 @@ function refreshDevices() {
             const id = $('jwf-edit-id').value;
             const data = {
                 name: $('jwf-s-name').value || 'Schedule',
+                source_server_id: $('jwf-s-srcserver').value,
                 source_file: ($('jwf-s-srcfile').value || '').trim(),
                 source_path: ($('jwf-s-srcpath').value || '').trim(),
                 server_id: $('jwf-s-server').value,
@@ -3149,7 +3190,8 @@ function refreshDevices() {
                 interval_hours: parseFloat($('jwf-s-interval').value || 6),
                 regions: collectRegions(),
             };
-            if (!data.server_id || !data.source_file){ showToastNow('Server ও source file দরকার', 'error'); return; }
+            if (!data.source_server_id){ showToastNow('Source Server সিলেক্ট করুন', 'error'); return; }
+            if (!data.server_id || !data.source_file){ showToastNow('Target Server ও source file দরকার', 'error'); return; }
             try {
                 const url = id ? '/api/jwtfactory/schedules/' + id : '/api/jwtfactory/schedules';
                 const res = await fetch(url, {method: id ? 'PUT' : 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)});
@@ -3176,7 +3218,7 @@ function refreshDevices() {
                         : "<button class='fx-btn fx-btn-warning text-[10px] px-2' onclick=\"jwfSchedAction('" + sc.id + "','pause')\"><i class='fas fa-pause'></i></button>";
                     return "<tr class='border-b' style='border-color:var(--hairline);'>" +
                         "<td class='p-2 font-bold'>" + esc(sc.name) + "</td>" +
-                        "<td class='p-2'>" + esc(sc.source_file) + "</td>" +
+                        "<td class='p-2 font-mono text-[10px]'>" + esc(sc.source_server_id || sc.server_id) + '<br>' + esc(sc.source_file) + "</td>" +
                         "<td class='p-2 font-mono text-[10px]'>" + esc(sc.server_id) + '<br>' + esc(sc.path||'/') + "</td>" +
                         "<td class='p-2'>" + esc(sc.output_name) + "</td>" +
                         "<td class='p-2'>" + sc.interval_hours + 'h</td>' +
