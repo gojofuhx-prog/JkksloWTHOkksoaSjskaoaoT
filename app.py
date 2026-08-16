@@ -2780,12 +2780,17 @@ def _jwf_run_schedule_job(sid):
         return
     try:
         server_id = sc.get('server_id')
+        # source can live on a DIFFERENT server/account than the upload target —
+        # fall back to server_id for schedules saved before source_server_id existed
+        src_server_id = sc.get('source_server_id') or server_id
         subpath = (sc.get('path') or '').strip().lstrip('/')
         out_name = (sc.get('output_name') or 'token_bd.json').strip()
-        if server_id not in SERVERS:
+        if server_id not in SERVERS or src_server_id not in SERVERS:
             return
-        base = SERVERS[server_id]['path']
-        src_path = os.path.normpath(os.path.join(base, (sc.get('source_path') or ''), sc.get('source_file') or ''))
+        src_base = SERVERS[src_server_id]['path']
+        src_path = os.path.normpath(os.path.join(src_base, (sc.get('source_path') or ''), sc.get('source_file') or ''))
+        if not os.path.realpath(src_path).startswith(os.path.realpath(src_base)):
+            return
         if not os.path.isfile(src_path):
             return
         with open(src_path, encoding='utf-8', errors='ignore') as f:
@@ -2807,6 +2812,8 @@ def _jwf_list_schedules():
             'id': sid,
             'name': sc.get('name', ''),
             'source_file': sc.get('source_file'),
+            'source_path': sc.get('source_path', ''),
+            'source_server_id': sc.get('source_server_id') or sc.get('server_id'),
             'server_id': sc.get('server_id'),
             'path': sc.get('path', ''),
             'output_name': sc.get('output_name', 'token_bd.json'),
@@ -2825,6 +2832,7 @@ def _jwf_create_schedule(data):
         'name': (data.get('name') or 'Schedule %s' % sid).strip(),
         'source_file': (data.get('source_file') or '').strip(),
         'source_path': (data.get('source_path') or '').strip(),
+        'source_server_id': (data.get('source_server_id') or data.get('server_id') or '').strip(),
         'server_id': data.get('server_id', ''),
         'path': (data.get('path') or '').strip(),
         'output_name': (data.get('output_name') or 'token_bd.json').strip(),
@@ -2844,7 +2852,7 @@ def _jwf_update_schedule(sid, data):
     sc = JWF_SCHEDULES.get(sid)
     if not sc:
         return {'error': 'Schedule নেই'}
-    for key in ('name', 'source_file', 'source_path', 'server_id', 'path',
+    for key in ('name', 'source_file', 'source_path', 'source_server_id', 'server_id', 'path',
                 'output_name', 'interval_hours', 'paused', 'regions'):
         if key in data:
             sc[key] = data[key]
