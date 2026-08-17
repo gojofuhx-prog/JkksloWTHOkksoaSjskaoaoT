@@ -1897,6 +1897,28 @@
         }
     }
     
+    async function saveJwtApiSettings() {
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jwt_api_url: document.getElementById('set-jwt-api-url').value.trim(),
+                    jwt_api_key: document.getElementById('set-jwt-api-key').value.trim()
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                showToast('JWT API সেটিংস সেভ হয়েছে!');
+            } else {
+                showToast(data.error || 'Failed', 'error');
+            }
+        } catch (e) {
+            showToast('Error', 'error');
+        }
+    }
+    window.saveJwtApiSettings = saveJwtApiSettings;
+
     function previewTheme(theme) {
         currentTheme = theme;
         const t = THEMES[theme];
