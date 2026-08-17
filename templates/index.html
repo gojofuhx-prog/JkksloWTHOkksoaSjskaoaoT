@@ -1625,6 +1625,16 @@
             </div>
             <button onclick="jwfOpenScheduleModal()" class="fx-btn fx-btn-info w-full mt-4"><i class="fas fa-plus"></i> New Schedule</button>
         </div>
+
+        <!-- ===== 3. JWT Live Monitor ===== -->
+        <div class="fx-card p-5" style="border-left: 4px solid var(--info);">
+            <h3 class="text-sm font-bold mb-4 flex items-center gap-2" style="color: var(--info);">
+                <i class="fas fa-satellite-dish"></i> JWT Live Monitor
+            </h3>
+            <p class="text-[11px] opacity-60 mb-3">প্রতিটা schedule-এর জন্য কত ID আছে, পরের রান কতক্ষণ পরে, আর চলতি রানের progress — সব এখানে লাইভ দেখা যাবে। Start চাপলেই সেই schedule সাথে সাথে নতুন করে JWT generate করে upload করবে।</p>
+            <div id="jwf-monitor-list" class="space-y-3"></div>
+            <div id="jwf-monitor-empty" class="text-center opacity-50 py-6 hidden">কোনো schedule নেই</div>
+        </div>
     </div>
 
     <!-- JWT Factory: Folder Browser Modal -->
@@ -1660,8 +1670,11 @@
                 <div><label class="text-xs opacity-70 mb-1 block">🖥️ Source Server (যে account থেকে file পড়বে)</label>
                     <div class="flex gap-2">
                         <select id="jwf-s-srcserver" class="fx-select flex-1" onchange="jwfRefreshSchedSrcHint()"></select>
-                        <button type="button" onclick="jwfBrowse('ssrc')" class="fx-btn fx-btn-info"><i class="fas fa-folder-open"></i> Browse</button>
+                        <label class="fx-btn fx-btn-warning" style="min-height:38px; cursor:pointer;" for="jwf-s-localfile"><i class="fas fa-file-upload"></i><input type="file" id="jwf-s-localfile" accept=".txt,.json,.js,.csv" class="hidden" onchange="jwfScheduleUploadFile(this)"></label>
+                        <button type="button" onclick="jwfBrowse('ssrc')" class="fx-btn fx-btn-info"><i class="fas fa-folder-open"></i></button>
                     </div>
+                    <p class="text-[10px] opacity-50 mt-1">📤 আগে Target Server বেছে নিন, তারপর ফোন থেকে ফাইল Upload করুন — সাথে সাথে নতুন JWT generate হয়ে Target-এ upload হয়ে যাবে (ঠিক Process Now-এর মতো)। ফাইলটা এই Source Server-এও সেভ থাকবে যাতে schedule-এর প্রতিটা future run এখান থেকেই আবার generate করতে পারে।</p>
+                    <div id="jwf-s-upload-status" class="text-[11px] mt-1" style="color: var(--info);"></div>
                 </div>
                 <div><label class="text-xs opacity-70 mb-1 block">Source File (server থেকে পড়বে)</label>
                     <div class="flex gap-2"><input type="text" id="jwf-s-srcfile" placeholder="accounts.txt" class="fx-input flex-1">
