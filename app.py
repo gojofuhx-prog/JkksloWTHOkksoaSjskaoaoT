@@ -102,6 +102,9 @@ DEFAULT_CONFIG = {
     "show_system_stats": True,
     "session_timeout": 60,
     "max_log_lines": 2000,
+    # JWT Factory — token-generation API endpoint & key (changeable from Settings)
+    "jwt_api_url": os.environ.get('JWT_API_URL', 'https://fiddu-jwt-token.vercel.app/token').strip(),
+    "jwt_api_key": os.environ.get('JWT_API_KEY', 'fxfuhx-secret-key').strip(),
     "passwords": {
         "secret": hashlib.sha256("FXFUHXFFKING".encode()).hexdigest(),
         "user": hashlib.sha256("admin".encode()).hexdigest()
@@ -597,6 +600,47 @@ def _mark_device_cookie(trust=False):
             _save_devices_locked()
         return DEVICES[did].get('trusted', False)
 
+def _gate_device_login(want_trust):
+    """Runs AFTER password verification but BEFORE a session is granted.
+    Enforces the real cap: only MAX_SELF_TRUST devices may ever be logged
+    in without Admin approval. A correct password alone is no longer
+    enough once those slots are full — the login is blocked and the
+    device is recorded as pending until an Admin approves it from the
+    Devices panel (or removes it, in which case it must ask again).
+    Returns (allowed: bool, block_message: str|None).
+    """
+    did = _device_cookie_id()
+    if not did:
+        # no device cookie at all (very old client) — can't gate it, allow
+        return True, None
+    with DEVICE_LOCK:
+        dev = DEVICES.get(did)
+        if dev and dev.get('trusted'):
+            return True, None
+        if _count_trusted() < MAX_SELF_TRUST:
+            # a free trusted slot exists — this login may proceed
+            # (_mark_device_cookie will self-approve it if want_trust is checked)
+            return True, None
+        # slots are full and this device isn't already trusted — block it
+        label = _device_label_from_ua()
+        if did in DEVICES:
+            DEVICES[did]['trusted'] = False
+            DEVICES[did]['pending'] = True
+            DEVICES[did]['browser'] = _ua_short()
+        else:
+            DEVICES[did] = {
+                'label': label,
+                'browser': _ua_short(),
+                'first_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'username': 'unknown',
+                'trusted': False,
+                'pending': True,
+            }
+        _save_devices_locked()
+    log_activity("Device Blocked", f"Device '{DEVICES[did]['label']}' — correct password but Trusted slots (%d/%d) full, awaiting admin approval" % (_count_trusted(), MAX_SELF_TRUST), "unknown")
+    return False, ('Trusted device slot (%d/%d) ভর্তি — এই ডিভাইসটি Admin Approve না করা পর্যন্ত Login করা যাবে না। '
+                    'Admin কে Devices প্যানেল থেকে Approve করতে বলুন, তারপর আবার Login করুন।') % (_count_trusted(), MAX_SELF_TRUST)
+
 def get_current_role():
     return "admin"
 
@@ -977,6 +1021,10 @@ def login():
                 break
 
         if matched_user:
+            allowed, block_msg = _gate_device_login(want_trust)
+            if not allowed:
+                log_activity("Login Blocked", f"User '{matched_user.get('username')}' — correct password, device awaiting approval", "unknown")
+                return render_template('login.html', error=block_msg, config=CONFIG, themes=THEMES, device_pending=True)
             session['logged_in'] = True
             session['is_admin'] = True
             session['login_time'] = time.time()
@@ -994,6 +1042,10 @@ def login():
 
         # 2) Legacy fallback: old single admin/user password system (both grant ADMIN MODE)
         if hashed == CONFIG['passwords']['secret']:
+            allowed, block_msg = _gate_device_login(want_trust)
+            if not allowed:
+                log_activity("Login Blocked", "Admin password correct — device awaiting approval", "unknown")
+                return render_template('login.html', error=block_msg, config=CONFIG, themes=THEMES, device_pending=True)
             session['logged_in'] = True
             session['is_admin'] = True
             session['login_time'] = time.time()
@@ -1008,6 +1060,10 @@ def login():
             log_activity("Login", "Admin logged in", "admin")
             return redirect(url_for('index'))
         elif hashed == CONFIG['passwords']['user']:
+            allowed, block_msg = _gate_device_login(want_trust)
+            if not allowed:
+                log_activity("Login Blocked", "User password correct — device awaiting approval", "unknown")
+                return render_template('login.html', error=block_msg, config=CONFIG, themes=THEMES, device_pending=True)
             session['logged_in'] = True
             session['is_admin'] = True
             session['login_time'] = time.time()
@@ -2108,6 +2164,10 @@ def settings_update():
     CONFIG['auto_refresh'] = data.get('auto_refresh', 'true') == 'true'
     CONFIG['notifications'] = data.get('notifications', 'true') == 'true'
     CONFIG['show_system_stats'] = data.get('show_system_stats', 'true') == 'true'
+    if 'jwt_api_url' in data:
+        CONFIG['jwt_api_url'] = (data.get('jwt_api_url') or '').strip() or CONFIG.get('jwt_api_url', '')
+    if 'jwt_api_key' in data:
+        CONFIG['jwt_api_key'] = (data.get('jwt_api_key') or '').strip() or CONFIG.get('jwt_api_key', '')
     save_json(CONFIG_FILE, CONFIG)
     log_activity("Settings", "Application settings updated", "admin")
     return jsonify({'status': 'ok'})
@@ -2537,6 +2597,15 @@ except ImportError:
 
 JWT_API_URL = (os.environ.get('JWT_API_URL') or 'https://fiddu-jwt-token.vercel.app/token').strip()
 JWT_API_KEY = (os.environ.get('JWT_API_KEY') or 'fxfuhx-secret-key').strip()
+
+def _jwf_api_creds():
+    """JWT token-generation API endpoint + key — read live from CONFIG so a
+    change made in Settings takes effect immediately, no restart needed.
+    Falls back to the env-var/hardcoded defaults if Settings has nothing set."""
+    url = (CONFIG.get('jwt_api_url') or JWT_API_URL).strip()
+    key = (CONFIG.get('jwt_api_key') or JWT_API_KEY).strip()
+    return url, key
+
 JWF_MAX_WORKERS = 8
 JWF_MAX_SOURCE_BYTES = 5 * 1024 * 1024  # 5 MB
 JWF_RUNS = {}
@@ -2627,7 +2696,8 @@ def _jwf_parse_source(text):
 
 def _jwf_fetch_one(uid, password):
     try:
-        r = requests.get(JWT_API_URL, params={'uid': uid, 'password': password, 'key': JWT_API_KEY},
+        api_url, api_key = _jwf_api_creds()
+        r = requests.get(api_url, params={'uid': uid, 'password': password, 'key': api_key},
                          timeout=60)
         if r.status_code == 200:
             j = r.json()
