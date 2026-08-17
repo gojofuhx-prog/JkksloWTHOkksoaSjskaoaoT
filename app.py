@@ -2876,14 +2876,65 @@ def _jwf_run_schedule_job(sid):
         res = _jwf_start_run(server_id, subpath, text, out_name, sc.get('regions'))
         sc['last_run'] = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
         sc['last_run_id'] = res.get('run_id', '')
+        # keep next_run in sync with the actual next APScheduler firing —
+        # without this it stayed frozen at its very first value forever
+        _jwf_sync_next_run(sid)
         _jwf_save_schedules()
     except Exception as e:
         print('[JWTFactory] schedule job error:', e)
 
 
+def _jwf_sync_next_run(sid):
+    """Pull the live next-fire time from APScheduler (authoritative) into the
+    schedule record, falling back to an interval-based estimate if the
+    scheduler/job isn't available yet."""
+    sc = JWF_SCHEDULES.get(sid)
+    if not sc:
+        return
+    if sc.get('paused'):
+        sc['next_run'] = 'Paused'
+        sc['next_run_ts'] = None
+        return
+    job = None
+    if _jwf_scheduler:
+        try:
+            job = _jwf_scheduler.get_job('jwtf_' + sid)
+        except Exception:
+            job = None
+    if job and job.next_run_time:
+        ts = job.next_run_time.timestamp()
+    else:
+        ts = datetime.datetime.utcnow().timestamp() + float(sc.get('interval_hours', 6)) * 3600
+    sc['next_run_ts'] = ts
+    sc['next_run'] = datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M UTC')
+
+
+def _jwf_source_account_count(sc):
+    """How many uid:pass accounts are in this schedule's current source file
+    (for the monitor dashboard) — None if the file can't be read right now."""
+    try:
+        server_id = sc.get('server_id')
+        src_server_id = sc.get('source_server_id') or server_id
+        if src_server_id not in SERVERS:
+            return None
+        src_base = SERVERS[src_server_id]['path']
+        src_path = os.path.normpath(os.path.join(src_base, (sc.get('source_path') or ''), sc.get('source_file') or ''))
+        if not os.path.realpath(src_path).startswith(os.path.realpath(src_base)):
+            return None
+        if not os.path.isfile(src_path):
+            return None
+        with open(src_path, encoding='utf-8', errors='ignore') as f:
+            text = f.read(JWF_MAX_SOURCE_BYTES)
+        return len(_jwf_parse_source(text))
+    except Exception:
+        return None
+
+
 def _jwf_list_schedules():
     rows = []
     for sid, sc in JWF_SCHEDULES.items():
+        _jwf_sync_next_run(sid)  # always show the true live countdown, not a stale snapshot
+        last_run_info = JWF_RUNS.get(sc.get('last_run_id') or '')
         rows.append({
             'id': sid,
             'name': sc.get('name', ''),
@@ -2897,7 +2948,20 @@ def _jwf_list_schedules():
             'paused': bool(sc.get('paused')),
             'last_run': sc.get('last_run'),
             'last_run_stats': sc.get('last_run_stats'),
+            'last_run_info': {
+                'run_id': sc.get('last_run_id'),
+                'status': last_run_info.get('status'),
+                'total': last_run_info.get('total'),
+                'done': last_run_info.get('done'),
+                'success': last_run_info.get('success'),
+                'failed': last_run_info.get('failed'),
+                'latest': last_run_info.get('latest'),
+                'started': last_run_info.get('started'),
+                'finished': last_run_info.get('finished'),
+            } if last_run_info else None,
             'next_run': sc.get('next_run'),
+            'next_run_ts': sc.get('next_run_ts'),
+            'account_count': _jwf_source_account_count(sc),
         })
     return rows
 
@@ -2961,10 +3025,7 @@ def _jwf_reschedule(sid):
         sched.add_job(_jwf_run_schedule_job, 'interval', args=[sid],
                       hours=float(sc.get('interval_hours', 6)), id='jwtf_' + sid,
                       replace_existing=True, misfire_grace_time=24 * 3600)
-        nxt = datetime.datetime.utcnow().timestamp() + float(sc.get('interval_hours', 6)) * 3600
-        sc['next_run'] = datetime.datetime.utcfromtimestamp(nxt).strftime('%Y-%m-%d %H:%M UTC')
-    else:
-        sc['next_run'] = 'Paused'
+    _jwf_sync_next_run(sid)
     _jwf_save_schedules()
 
 
@@ -2974,7 +3035,7 @@ def _jwf_schedule_action(sid, action):
         return {'error': 'Schedule নেই'}
     if action == 'run':
         _jwf_run_schedule_job(sid)
-        return {'ok': True, 'message': 'এখনই রান শুরু'}
+        return {'ok': True, 'message': 'এখনই রান শুরু', 'run_id': sc.get('last_run_id', '')}
     if action == 'pause':
         sc['paused'] = True
         _jwf_reschedule(sid)
