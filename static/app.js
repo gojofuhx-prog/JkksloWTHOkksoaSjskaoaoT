@@ -3060,6 +3060,26 @@ function refreshDevices() {
             reader.readAsText(f);
             inp.value = ''; // allow re-picking the same file
         };
+
+        async function jwfPollUploadRun(runId, statusEl, fname){
+            try {
+                const res = await fetch('/api/jwtfactory/progress/' + runId);
+                const info = await res.json();
+                if (info.error){ if (statusEl) statusEl.textContent = '⚠️ ' + info.error; return; }
+                if (info.status === 'running'){
+                    if (statusEl) statusEl.textContent = '⏳ ' + fname + ' থেকে JWT generate হচ্ছে... ' + (info.done||0) + '/' + (info.total||0);
+                    setTimeout(function(){ jwfPollUploadRun(runId, statusEl, fname); }, 1500);
+                } else {
+                    const ok = info.success || 0, fail = info.failed || 0;
+                    const iv = ($('jwf-s-interval') && $('jwf-s-interval').value) || '6';
+                    if (statusEl) statusEl.textContent = '✅ ' + fname + ' থেকে ' + ok + 'টা token generate ও Target-এ upload হয়ে গেছে' +
+                        (fail ? (' (fail: ' + fail + ')') : '') + ' — নিচে Save চাপলে এখন থেকে প্রতি ' + iv + ' ঘণ্টা পরপর এভাবেই auto চলবে।';
+                    showToastNow('✅ JWT generate সম্পন্ন — ' + ok + ' success' + (fail ? (', ' + fail + ' fail') : ''));
+                }
+            } catch(e){
+                if (statusEl) statusEl.textContent = '⚠️ Progress check করা যায়নি: ' + e.message;
+            }
+        }
         /* ---------- run now ---------- */
         window.jwfRunNow = async function(){
             const sEl = $('jwf-target-server');
@@ -3137,6 +3157,69 @@ function refreshDevices() {
             const sep = spath === '/' ? '' : '/';
             hEl.textContent = '📖 Source থেকে পড়বে: ' + ssid + ' : ' + spath + (fname ? sep + fname : '');
         }
+        window.jwfScheduleUploadFile = async function(inp){
+            const f = inp.files && inp.files[0];
+            if (!f) return;
+            if (f.size > 10 * 1024 * 1024){ showToastNow('সর্বোচ্চ 10MB', 'error'); inp.value = ''; return; }
+            const ssEl = $('jwf-s-srcserver');
+            const sid = ssEl && ssEl.value;
+            const statusEl = $('jwf-s-upload-status');
+            if (!sid){ showToastNow('প্রথমে Source Server সিলেক্ট করুন', 'error'); inp.value = ''; return; }
+            const reader = new FileReader();
+            reader.onload = async function(ev){
+                const content = ev.target.result;
+                let path = ($('jwf-s-srcpath').value || '/').trim();
+                if (path === '/' || path === '') path = '';
+                if (statusEl) statusEl.textContent = '⏳ Upload হচ্ছে...';
+                try {
+                    // 1) save the raw account file on the Source Server — this is what
+                    //    every FUTURE scheduled run will re-read from
+                    const res = await fetch('/api/files/' + encodeURIComponent(sid) + '/save', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ filename: f.name, path: path, content: content })
+                    });
+                    const j = await res.json();
+                    if (j.status !== 'ok'){
+                        if (statusEl) statusEl.textContent = '';
+                        showToastNow(j.error || 'Upload ব্যর্থ', 'error');
+                        return;
+                    }
+                    $('jwf-s-srcfile').value = f.name;
+                    jwfRefreshSchedSrcHint();
+
+                    // 2) RIGHT NOW — generate fresh JWT tokens from this exact file and
+                    //    upload them to the Target Server, same as pressing "Process Now"
+                    const tgtSid = ($('jwf-s-server') && $('jwf-s-server').value) || '';
+                    if (!tgtSid){
+                        if (statusEl) statusEl.textContent = '✅ ' + f.name + ' সার্ভারে সেভ হয়েছে। এখন JWT generate করতে আগে Target Server সিলেক্ট করুন, তারপর আবার Upload করুন — তখনই সাথে সাথে token generate ও upload হবে।';
+                        showToastNow('✅ Source সেভ হয়েছে — Target Server সিলেক্ট করে আবার Upload করুন', 'error');
+                        return;
+                    }
+                    const tgtPath = ($('jwf-s-path') && $('jwf-s-path').value || '/').trim();
+                    const outName = ($('jwf-s-outname') && $('jwf-s-outname').value || 'token_bd.json').trim();
+                    if (statusEl) statusEl.textContent = '⏳ ' + f.name + ' সেভ হয়েছে — এখন নতুন JWT generate হচ্ছে...';
+                    const runRes = await fetch('/api/jwtfactory/run', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ server_id: tgtSid, path: tgtPath, source: content, output_name: outName, regions: collectRegions() })
+                    });
+                    const runJ = await runRes.json();
+                    if (runJ.error || !runJ.run_id){
+                        if (statusEl) statusEl.textContent = '⚠️ Source সেভ হয়েছে কিন্তু generate শুরু করা যায়নি: ' + (runJ.error || 'unknown error');
+                        showToastNow(runJ.error || 'Generate শুরু করা যায়নি', 'error');
+                        return;
+                    }
+                    showToastNow('🚀 Upload হয়েছে — সাথে সাথে নতুন JWT generate শুরু হয়েছে');
+                    jwfPollUploadRun(runJ.run_id, statusEl, f.name);
+                } catch(e){
+                    if (statusEl) statusEl.textContent = '';
+                    showToastNow('Error: ' + e.message, 'error');
+                }
+            };
+            reader.onerror = function(){ showToastNow('File পড়া যায়নি', 'error'); };
+            reader.readAsText(f);
+            inp.value = '';
+        };
+
         window.jwfRefreshSchedSrcHint = jwfRefreshSchedSrcHint;
         ['jwf-s-srcfile','jwf-s-srcpath'].forEach(id => {
             const el = $(id);
@@ -3158,6 +3241,7 @@ function refreshDevices() {
             $('jwf-s-name').value=''; $('jwf-s-srcfile').value=''; $('jwf-s-srcpath').value='';
             $('jwf-s-path').value='/'; $('jwf-s-outname').value='token_bd.json'; $('jwf-s-interval').value='6';
             $('jwf-s-regions').innerHTML='';
+            const upEl = $('jwf-s-upload-status'); if (upEl) upEl.textContent = '';
             $('jwfSchedModal').classList.add('active');
             if (editId) fillScheduleEdit(editId);
             else jwfRefreshSchedSrcHint();
@@ -3267,9 +3351,127 @@ function refreshDevices() {
                 }
                 const j = await res.json();
                 showToastNow(j.message || (action === 'delete' ? 'Delete হয়েছে' : 'OK'));
+                if (action === 'run' && j.run_id){ jwfMonitorActiveRuns[id] = j.run_id; jwfPollActiveRuns(); }
                 if (action !== 'run') loadSchedules();
             } catch(e){ showToastNow('Error: ' + e.message, 'error'); }
         };
+
+        /* ---------- JWT live monitor (progress bar + countdown + Start per schedule) ---------- */
+        let jwfMonitorRows = [];
+        const jwfMonitorActiveRuns = {}; // schedule id -> run_id currently being polled live
+
+        function jwfViewActive(){
+            const v = document.getElementById('view-jwtfactory');
+            return !!(v && v.classList.contains('active'));
+        }
+
+        function jwfFmtCountdown(ts){
+            if (!ts) return '—';
+            const diff = Math.round(ts - Date.now() / 1000);
+            if (diff <= 0) return 'এখনই';
+            const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60), s = diff % 60;
+            if (h > 0) return h + 'ঘ ' + m + 'মি বাকি';
+            if (m > 0) return m + 'মি ' + s + 'সে বাকি';
+            return s + 'সে বাকি';
+        }
+
+        function jwfRenderMonitor(){
+            const list = $('jwf-monitor-list'), empty = $('jwf-monitor-empty');
+            if (!list) return;
+            if (!jwfMonitorRows.length){ list.innerHTML = ''; if (empty) empty.classList.remove('hidden'); return; }
+            if (empty) empty.classList.add('hidden');
+            const esc = s => (s === null || s === undefined ? '' : String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            list.innerHTML = jwfMonitorRows.map(sc => {
+                const info = sc.last_run_info;
+                const running = info && info.status === 'running';
+                const total = running ? (info.total || 0) : 0;
+                const done = running ? (info.done || 0) : 0;
+                const pct = running ? (total > 0 ? Math.min(100, Math.round(done / total * 100)) : 5) : (sc.paused ? 0 : 100);
+                const barColor = running ? 'var(--info)' : (sc.paused ? 'var(--danger)' : 'var(--primary)');
+                const statusText = running
+                    ? ('⏳ চলছে... ' + done + '/' + total + (info.latest ? (' — ' + esc(info.latest)) : ''))
+                    : sc.paused
+                        ? '⏸️ Paused'
+                        : (sc.last_run
+                            ? ('✅ শেষ রান: ' + esc(sc.last_run) + (sc.last_run_stats ? (' (ok ' + (sc.last_run_stats.success||0) + ' / fail ' + (sc.last_run_stats.failed||0) + ')') : ''))
+                            : '— এখনো রান হয়নি');
+                const countdown = sc.paused ? 'Paused' : jwfFmtCountdown(sc.next_run_ts);
+                const idCount = (sc.account_count === null || sc.account_count === undefined) ? '—' : sc.account_count;
+                const startDisabled = running ? 'disabled style="opacity:.5;cursor:not-allowed;"' : '';
+                return '<div class="p-3 rounded-lg" style="background: rgba(255,255,255,.03); border:1px solid var(--hairline);">' +
+                    '<div class="flex items-center justify-between gap-2 mb-1.5">' +
+                        '<div class="font-bold text-xs">' + esc(sc.name) + '</div>' +
+                        '<button class="fx-btn fx-btn-success text-[10px] px-3 py-1" ' + startDisabled + ' onclick="jwfMonitorStart(\'' + sc.id + '\')"><i class="fas fa-play"></i> Start</button>' +
+                    '</div>' +
+                    '<div class="text-[10px] opacity-70 font-mono mb-2 break-all">' +
+                        '🖥️ ' + esc(sc.source_server_id || sc.server_id) + ' → ' + esc(sc.server_id) + ':' + esc(sc.path || '/') +
+                        ' &nbsp;|&nbsp; 🆔 ' + idCount + ' IDs' +
+                        ' &nbsp;|&nbsp; ⏱️ ' + esc(countdown) +
+                    '</div>' +
+                    '<div class="w-full rounded-full overflow-hidden" style="height:6px; background: rgba(255,255,255,.08);">' +
+                        '<div style="height:100%; width:' + pct + '%; background:' + barColor + '; transition: width .4s;"></div>' +
+                    '</div>' +
+                    '<div class="text-[10px] mt-1.5 opacity-80">' + statusText + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        async function jwfLoadMonitor(){
+            if (!jwfViewActive()) return;
+            try {
+                const res = await fetch('/api/jwtfactory/schedules');
+                const j = await res.json();
+                jwfMonitorRows = j.schedules || [];
+                jwfMonitorRows.forEach(sc => {
+                    const info = sc.last_run_info;
+                    if (info && info.status === 'running' && info.run_id) jwfMonitorActiveRuns[sc.id] = info.run_id;
+                });
+                jwfRenderMonitor();
+            } catch(e){ console.warn('jwfLoadMonitor', e); }
+        }
+
+        async function jwfPollActiveRuns(){
+            if (!jwfViewActive()) return;
+            const ids = Object.keys(jwfMonitorActiveRuns);
+            if (!ids.length) return;
+            let anyFinished = false;
+            for (const sid of ids){
+                const runId = jwfMonitorActiveRuns[sid];
+                if (!runId){ delete jwfMonitorActiveRuns[sid]; continue; }
+                try {
+                    const res = await fetch('/api/jwtfactory/progress/' + runId);
+                    if (!res.ok){ delete jwfMonitorActiveRuns[sid]; continue; }
+                    const info = await res.json();
+                    if (info.error){ delete jwfMonitorActiveRuns[sid]; continue; }
+                    const row = jwfMonitorRows.find(r => r.id === sid);
+                    if (row) row.last_run_info = Object.assign({}, row.last_run_info, info, {run_id: runId});
+                    if (info.status !== 'running'){ delete jwfMonitorActiveRuns[sid]; anyFinished = true; }
+                } catch(e){ /* transient — try again next tick */ }
+            }
+            jwfRenderMonitor();
+            if (anyFinished) jwfLoadMonitor(); // refresh next_run/account_count/last_run once a run completes
+        }
+
+        window.jwfMonitorStart = async function(sid){
+            try {
+                const res = await fetch('/api/jwtfactory/schedules/' + sid + '/action', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'run'})
+                });
+                const j = await res.json();
+                if (j.run_id){
+                    jwfMonitorActiveRuns[sid] = j.run_id;
+                    showToastNow('🚀 নতুন JWT generate শুরু হয়েছে');
+                    jwfPollActiveRuns();
+                } else {
+                    showToastNow(j.message || j.error || 'শুরু হয়েছে', j.error ? 'error' : undefined);
+                }
+                loadSchedules();
+            } catch(e){ showToastNow('Error: ' + e.message, 'error'); }
+        };
+
+        setInterval(jwfRenderMonitor, 1000);       // tick the countdown text every second (no network)
+        setInterval(jwfPollActiveRuns, 2000);       // live progress for any run currently in flight
+        setInterval(jwfLoadMonitor, 15000);         // periodic full refresh (new schedules, next-run drift)
 
         /* hook into view switching */
         const origSwitch = window.switchView;
@@ -3282,6 +3484,7 @@ function refreshDevices() {
                 setTimeout(function(){ jwfLoadServerOptions('src'); jwfLoadServerOptions('tgt'); }, 1500);
                 $('jwf-upload-target') && (jwfRefreshTargetHint());
                 loadSchedules();
+                jwfLoadMonitor();
             }
         };
         // ALSO populate immediately when the DOM is ready (before first view switch) so the
