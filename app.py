@@ -102,9 +102,10 @@ DEFAULT_CONFIG = {
     "show_system_stats": True,
     "session_timeout": 60,
     "max_log_lines": 2000,
-    # JWT Factory — token-generation API endpoint & key (changeable from Settings)
-    "jwt_api_url": os.environ.get('JWT_API_URL', 'https://fiddu-jwt-token.vercel.app/token').strip(),
-    "jwt_api_key": os.environ.get('JWT_API_KEY', 'fxfuhx-secret-key').strip(),
+    # JWT Factory — token-generation API endpoint & key (changeable from Settings).
+    # Many token APIs need no key at all — leave jwt_api_key blank if yours doesn't.
+    "jwt_api_url": os.environ.get('JWT_API_URL', 'https://fiddu-jwt-olive.vercel.app/token').strip(),
+    "jwt_api_key": os.environ.get('JWT_API_KEY', '').strip(),
     "passwords": {
         "secret": hashlib.sha256("FXFUHXFFKING".encode()).hexdigest(),
         "user": hashlib.sha256("admin".encode()).hexdigest()
@@ -2167,7 +2168,9 @@ def settings_update():
     if 'jwt_api_url' in data:
         CONFIG['jwt_api_url'] = (data.get('jwt_api_url') or '').strip() or CONFIG.get('jwt_api_url', '')
     if 'jwt_api_key' in data:
-        CONFIG['jwt_api_key'] = (data.get('jwt_api_key') or '').strip() or CONFIG.get('jwt_api_key', '')
+        # key is optional — an explicitly blank value is honored (clears it),
+        # unlike the URL which always needs a real value
+        CONFIG['jwt_api_key'] = (data.get('jwt_api_key') or '').strip()
     save_json(CONFIG_FILE, CONFIG)
     log_activity("Settings", "Application settings updated", "admin")
     return jsonify({'status': 'ok'})
@@ -2595,15 +2598,16 @@ try:
 except ImportError:
     _BGS = None
 
-JWT_API_URL = (os.environ.get('JWT_API_URL') or 'https://fiddu-jwt-token.vercel.app/token').strip()
+JWT_API_URL = (os.environ.get('JWT_API_URL') or 'https://fiddu-jwt-olive.vercel.app/token').strip()
 JWT_API_KEY = (os.environ.get('JWT_API_KEY') or 'fxfuhx-secret-key').strip()
 
 def _jwf_api_creds():
     """JWT token-generation API endpoint + key — read live from CONFIG so a
     change made in Settings takes effect immediately, no restart needed.
-    Falls back to the env-var/hardcoded defaults if Settings has nothing set."""
+    Key is genuinely optional: leave it blank in Settings if your API
+    doesn't need one — an empty key is never sent as a request param."""
     url = (CONFIG.get('jwt_api_url') or JWT_API_URL).strip()
-    key = (CONFIG.get('jwt_api_key') or JWT_API_KEY).strip()
+    key = (CONFIG.get('jwt_api_key') or '').strip()
     return url, key
 
 JWF_MAX_WORKERS = 8
@@ -2697,8 +2701,10 @@ def _jwf_parse_source(text):
 def _jwf_fetch_one(uid, password):
     try:
         api_url, api_key = _jwf_api_creds()
-        r = requests.get(api_url, params={'uid': uid, 'password': password, 'key': api_key},
-                         timeout=60)
+        params = {'uid': uid, 'password': password}
+        if api_key:
+            params['key'] = api_key
+        r = requests.get(api_url, params=params, timeout=60)
         if r.status_code == 200:
             j = r.json()
             if isinstance(j, dict) and j.get('token'):
